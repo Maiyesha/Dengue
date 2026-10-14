@@ -1,7 +1,7 @@
 import XCTest
 @testable import DengueCaptureCore
 
-final class TestClock: DengueCaptureCore.Clock {
+final class TestClock: OutboxClock {
     var wallNow: Date
     var monotonicNanos: UInt64
     var serverOffset: TimeInterval

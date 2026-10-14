@@ -12,10 +12,10 @@ public final class Outbox {
     public static let maxBackoff: TimeInterval = 900
 
     private let store: OutboxStore
-    private let clock: Clock
+    private let clock: OutboxClock
     private let lock = NSRecursiveLock()
 
-    public init(store: OutboxStore, clock: Clock) {
+    public init(store: OutboxStore, clock: OutboxClock) {
         self.store = store
         self.clock = clock
     }
@@ -57,13 +57,31 @@ public final class Outbox {
             .element
     }
 
-    public func markInFlight(_ id: UUID) throws { try mutate(id) { $0.status = .inFlight } }
+    /// Statuses a late callback must not revive.
+    private static func isFrozen(_ s: OutboxItem.Status) -> Bool {
+        s == .quarantined || s == .failed || s == .needsRepeat || s == .quarantinePending
+    }
 
-    public func markDone(_ id: UUID) throws { try mutate(id) { $0.status = .done } }
+    public func markInFlight(_ id: UUID) throws {
+        try mutate(id, guarded: true) { $0.status = .inFlight }
+    }
+
+    public func markDone(_ id: UUID) throws {
+        try mutate(id, guarded: true) { $0.status = .done }
+    }
+
+    /// Call on launch: inFlight items were interrupted by a crash or kill. Idempotency keys are kept.
+    public func recoverInFlight() throws {
+        lock.lock(); defer { lock.unlock() }
+        for var it in try store.loadAll() where it.status == .inFlight {
+            it.status = .pending
+            try store.upsert(it)
+        }
+    }
 
     public func markRetry(_ id: UUID) throws {
         let now = clock.wallNow
-        try mutate(id) {
+        try mutate(id, guarded: true) {
             $0.attempts += 1
             $0.status = .pending
             $0.nextAttemptAt = now.addingTimeInterval(Outbox.backoff(attempts: $0.attempts))
@@ -110,6 +128,11 @@ public final class Outbox {
             try markNeedsRepeat(sessionId: it.sessionId, reasons: reasons)
             return .needsRepeat
         case .stopAndQuarantine(let code):
+            try mutateSession(it.sessionId) {
+                if $0.status == .pending || $0.status == .inFlight || $0.status == .needsRepeat {
+                    $0.status = .quarantinePending
+                }
+            }
             try mutate(id) { $0.failureReason = code }
             return .quarantineRequired(sessionId: it.sessionId)
         case .uploadHashMismatch:
@@ -127,12 +150,34 @@ public final class Outbox {
 
     private func fail(_ id: UUID, _ reason: String) throws -> OutboxAction {
         try mutate(id) { $0.status = .failed; $0.failureReason = reason }
+        try cascadeFailure(from: id)
         return .failed
     }
 
-    private func mutate(_ id: UUID, _ f: (inout OutboxItem) -> Void) throws {
+    /// Fails every item that transitively depends on `root` and is not already finished.
+    private func cascadeFailure(from root: UUID) throws {
+        lock.lock(); defer { lock.unlock() }
+        var failed: Set<UUID> = [root]
+        var changed = true
+        while changed {
+            changed = false
+            for var it in try store.loadAll() {
+                guard let dep = it.dependsOn, failed.contains(dep), !failed.contains(it.id) else { continue }
+                failed.insert(it.id)
+                changed = true
+                if it.status != .done && it.status != .quarantined {
+                    it.status = .failed
+                    it.failureReason = "dependency failed"
+                    try store.upsert(it)
+                }
+            }
+        }
+    }
+
+    private func mutate(_ id: UUID, guarded: Bool = false, _ f: (inout OutboxItem) -> Void) throws {
         lock.lock(); defer { lock.unlock() }
         guard var it = try store.loadAll().first(where: { $0.id == id }) else { return }
+        if guarded && Outbox.isFrozen(it.status) { return }
         f(&it)
         try store.upsert(it)
     }

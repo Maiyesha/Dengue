@@ -6,7 +6,7 @@ public enum OutboxKind: String, Codable, Equatable {
 
 public struct OutboxItem: Codable, Equatable {
     public enum Status: String, Codable, Equatable {
-        case pending, inFlight, done, failed, quarantined, needsRepeat
+        case pending, inFlight, done, failed, quarantined, needsRepeat, quarantinePending
     }
     public var id: UUID
     public var sessionId: UUID

@@ -45,7 +45,7 @@ public final class GRDBOutboxStore: OutboxStore {
 }
 
 extension Outbox {
-    public convenience init(dbPath: String, clock: Clock) throws {
+    public convenience init(dbPath: String, clock: OutboxClock) throws {
         self.init(store: try GRDBOutboxStore(path: dbPath), clock: clock)
     }
 }
