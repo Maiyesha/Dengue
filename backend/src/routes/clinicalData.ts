@@ -1,5 +1,6 @@
 // Reference vitals and labs. Idempotent per observation_id / lab id (retries are safe).
 // Out-of-range vitals are stored and flagged INVALID by the DB trigger, never rejected.
+// Units are fixed per vital / lab (VITAL_UNITS, LAB_UNITS); a different unit string is 400.
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -8,32 +9,45 @@ import { actorOf, requireUser } from '../auth';
 import { withRls } from '../db';
 import { audit } from '../audit';
 import { idempotent } from '../idempotency';
+import { LAB_UNITS, VITAL_UNITS } from '../units';
 
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
 const iso = z.string().datetime({ offset: true });
 
+// Each vital / lab has exactly one accepted unit (F7); anything else is 400 DS_VALIDATION_001.
+
+const table = (m: Record<string, string>) => Object.entries(m).map(([k, u]) => `${k}: "${u}"`).join(', ');
+const unitMismatch = (ctx: z.RefinementCtx, expected: string) =>
+  ctx.addIssue({ code: 'custom', path: ['unit'], message: `unit must be "${expected}"` });
+
 const Observation = z
   .object({
     observation_id: z.string().uuid(),
-    vital: z.enum(['hr', 'spo2', 'sbp', 'dbp', 'temp_c', 'rr', 'crt_s']),
+    vital: z.enum(Object.keys(VITAL_UNITS) as [keyof typeof VITAL_UNITS, ...Array<keyof typeof VITAL_UNITS>]),
     value: z.number().finite(),
-    unit: z.string().min(1).max(32),
+    unit: z.string().min(1).max(32).describe(`Fixed per vital (exact string): ${table(VITAL_UNITS)}`),
     source_device_type: z.string().min(1).max(100),
     measured_at: iso,
     scan_client_session_id: z.string().uuid().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((o, ctx) => {
+    if (o.unit !== VITAL_UNITS[o.vital]) unitMismatch(ctx, VITAL_UNITS[o.vital]);
+  });
 
 const Lab = z
   .object({
     id: z.string().uuid(),
-    test: z.enum(['haemoglobin', 'haematocrit', 'wbc_count', 'platelet_count']),
+    test: z.enum(Object.keys(LAB_UNITS) as [keyof typeof LAB_UNITS, ...Array<keyof typeof LAB_UNITS>]),
     value: z.number().finite(),
-    unit: z.string().min(1).max(32),
+    unit: z.string().min(1).max(32).describe(`Fixed per test (exact string): ${table(LAB_UNITS)}`),
     collected_at: iso,
     methodology: z.string().min(1).max(200),
   })
-  .strict();
+  .strict()
+  .superRefine((l, ctx) => {
+    if (l.unit !== LAB_UNITS[l.test]) unitMismatch(ctx, LAB_UNITS[l.test]);
+  });
 
 const Body = z
   .object({ observations: z.array(Observation).max(500), labs: z.array(Lab).max(500).optional() })

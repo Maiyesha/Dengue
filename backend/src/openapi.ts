@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { jsonSchemaTransform } from 'fastify-type-provider-zod';
 import type { SwaggerOptions } from '@fastify/swagger';
+import { LAB_UNITS, VITAL_UNITS } from './units';
 
 // ---------------------------------------------------------------------------------------------
 // Error catalog
@@ -170,6 +171,8 @@ interface RouteDoc {
   ok: Record<number, z.ZodType | null>;
   /** Error statuses beyond the generic ones derived from `auth` / `idempotent`. */
   errors?: number[];
+  /** Extra OpenAPI operation fields (e.g. x-units). */
+  extensions?: Record<string, unknown>;
 }
 
 const SITE = ['nurse_operator', 'clinician'];
@@ -191,6 +194,7 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
   'POST /v1/patients/{id}/clinical-data': {
     operationId: 'submitClinicalData', summary: 'Submit reference vitals and labs (idempotent per id)', tag: 'clinical', auth: 'user', roles: SITE,
     idempotent: true, ok: { 201: R.ClinicalData }, errors: [404],
+    extensions: { 'x-units': { vitals: VITAL_UNITS, labs: LAB_UNITS } },
   },
   'POST /v1/scans': {
     operationId: 'createScan', summary: 'Create a scan session (201 new, 200 if client_session_id already stored)', tag: 'scans', auth: 'user', roles: SITE,
@@ -320,6 +324,7 @@ function decorate(doc: Json): Json {
       op.security = SECURITY[d.auth];
       if (d.roles) op['x-roles'] = d.roles;
       op['x-auth'] = d.auth;
+      Object.assign(op, d.extensions ?? {});
       if (d.auth === 'optional_user') {
         op.description =
           'Authentication is optional. With a user bearer token (admin or clinician with a site): enrolment flow, challenge issued by POST /v1/devices/challenge. ' +

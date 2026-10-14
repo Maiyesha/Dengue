@@ -1217,6 +1217,7 @@
                           "type": "string"
                         },
                         "unit": {
+                          "description": "Fixed per test (exact string): haemoglobin: \"g/dL\", haematocrit: \"%\", wbc_count: \"10^9/L\", platelet_count: \"10^9/L\"",
                           "maxLength": 32,
                           "minLength": 1,
                           "type": "string"
@@ -1263,6 +1264,7 @@
                           "type": "string"
                         },
                         "unit": {
+                          "description": "Fixed per vital (exact string): hr: \"/min\", spo2: \"%\", sbp: \"mmHg\", dbp: \"mmHg\", temp_c: \"°C\", rr: \"/min\", crt_s: \"s\"",
                           "maxLength": 32,
                           "minLength": 1,
                           "type": "string"
@@ -1418,7 +1420,24 @@
         "x-roles": [
           "nurse_operator",
           "clinician"
-        ]
+        ],
+        "x-units": {
+          "labs": {
+            "haematocrit": "%",
+            "haemoglobin": "g/dL",
+            "platelet_count": "10^9/L",
+            "wbc_count": "10^9/L"
+          },
+          "vitals": {
+            "crt_s": "s",
+            "dbp": "mmHg",
+            "hr": "/min",
+            "rr": "/min",
+            "sbp": "mmHg",
+            "spo2": "%",
+            "temp_c": "°C"
+          }
+        }
       }
     },
     "/v1/patients/{id}/consent-status": {

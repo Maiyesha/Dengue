@@ -17,7 +17,7 @@ const ob = (o: Record<string, unknown> = {}) => {
     observation_id,
     vital: 'hr',
     value: 80,
-    unit: 'bpm',
+    unit: '/min',
     source_device_type: 'pulse_oximeter',
     measured_at: new Date().toISOString(),
     ...o,
@@ -115,6 +115,42 @@ describe('clinical data', () => {
     const r = await post(PATIENT_A, { observations: [o] });
     expect(r.statusCode).toBe(409);
     expect(r.json().error.code).toBe('DS_CLINICAL_001');
+  });
+
+  const VITAL_UNITS: Record<string, string> = {
+    hr: '/min', spo2: '%', sbp: 'mmHg', dbp: 'mmHg', temp_c: '°C', rr: '/min', crt_s: 's',
+  };
+  const LAB_UNITS: Record<string, string> = {
+    haemoglobin: 'g/dL', haematocrit: '%', wbc_count: '10^9/L', platelet_count: '10^9/L',
+  };
+  const lab = (test: string, unit: string) => {
+    const id = randomUUID();
+    labIds.push(id);
+    return { id, test, value: 10, unit, collected_at: new Date().toISOString(), methodology: 'analyser' };
+  };
+
+  it('accepts every vital and lab in its fixed unit', async () => {
+    const observations = Object.entries(VITAL_UNITS).map(([vital, unit]) => ob({ vital, unit, value: 1 }));
+    const labs = Object.entries(LAB_UNITS).map(([t, u]) => lab(t, u));
+    const r = await post(PATIENT_A, { observations, labs });
+    expect(r.statusCode).toBe(201);
+    expect(r.json().accepted).toBe(observations.length + labs.length);
+  });
+
+  it('a mismatched unit -> 400 DS_VALIDATION_001 (vitals and labs)', async () => {
+    const wrong: Array<[string, string]> = [
+      ['hr', 'bpm'], ['spo2', 'percent'], ['sbp', 'kPa'], ['dbp', 'mmhg'], ['temp_c', 'F'], ['rr', 'bpm'], ['crt_s', 'ms'],
+    ];
+    for (const [vital, unit] of wrong) {
+      const r = await post(PATIENT_A, { observations: [ob({ vital, unit })] });
+      expect(r.statusCode, `${vital} ${unit}`).toBe(400);
+      expect(r.json().error.code).toBe('DS_VALIDATION_001');
+    }
+    for (const [t, u] of [['haemoglobin', 'g/L'], ['haematocrit', 'L/L'], ['wbc_count', '/uL'], ['platelet_count', '10^3/uL']]) {
+      const r = await post(PATIENT_A, { observations: [], labs: [lab(t, u)] });
+      expect(r.statusCode, `${t} ${u}`).toBe(400);
+      expect(r.json().error.code).toBe('DS_VALIDATION_001');
+    }
   });
 
   it('writes a clinical_data:create audit row', async () => {

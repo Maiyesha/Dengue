@@ -64,6 +64,16 @@ describe('OpenAPI contract', () => {
     expect(sec('POST /v1/artefacts/{id}/complete')).toEqual([{ userBearer: [] }, { deviceBearer: [] }]);
   });
 
+  it('documents the fixed clinical units (x-units and unit descriptions)', async () => {
+    const doc = (await generateOpenApi()) as { paths: Record<string, Record<string, Record<string, any>>> };
+    const op = doc.paths['/v1/patients/{id}/clinical-data'].post;
+    expect(op['x-units'].vitals).toEqual({ hr: '/min', spo2: '%', sbp: 'mmHg', dbp: 'mmHg', temp_c: '°C', rr: '/min', crt_s: 's' });
+    expect(op['x-units'].labs).toEqual({ haemoglobin: 'g/dL', haematocrit: '%', wbc_count: '10^9/L', platelet_count: '10^9/L' });
+    const body = op.requestBody.content['application/json'].schema;
+    expect(body.properties.observations.items.properties.unit.description).toMatch(/temp_c: "°C"/);
+    expect(body.properties.labs.items.properties.unit.description).toMatch(/haemoglobin: "g\/dL"/);
+  });
+
   it('serves the same document at GET /openapi.json', async () => {
     const app = buildApp({ now: () => new Date(0) } as unknown as AppDeps);
     const res = await app.inject({ method: 'GET', url: '/openapi.json' });
