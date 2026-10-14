@@ -10,8 +10,21 @@ public enum APIError: Error, Equatable {
     case retryable
     case invalid(code: String)
     case uploadHashMismatch
+    /// DS_QG_099: max recaptures reached; the server committed (steps marked UNABLE_TO_ACQUIRE). Refetch the scan.
+    case recaptureExhausted(unableToAcquire: [String], recaptured: [String], status: String)
 
-    public static func from(code: String, httpStatus: Int, reasonCodes: [ReasonCode] = []) -> APIError {
+    public static func from(code: String, httpStatus: Int, reasonCodes: [ReasonCode] = [],
+                             detail: [String: JSONValue]? = nil) -> APIError {
+        if code == "DS_QG_099" {
+            func strings(_ k: String) -> [String] {
+                guard case .array(let a)? = detail?[k] else { return [] }
+                return a.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
+            }
+            var status = ""
+            if case .string(let st)? = detail?["status"] { status = st }
+            return .recaptureExhausted(unableToAcquire: strings("unable_to_acquire"),
+                                       recaptured: strings("recaptured"), status: status)
+        }
         if code.hasPrefix("DS_REG_") { return .stopAndQuarantine(code: code) }
         if code.hasPrefix("DS_QG_") || code.hasPrefix("DS_RPPG_") || code.hasPrefix("DS_SEG_") {
             if !reasonCodes.isEmpty { return .needsRepeat(reasonCodes) }
@@ -21,7 +34,7 @@ public enum APIError: Error, Equatable {
         switch code {
         case "DS_SCAN_001": return .duplicateRecent
         case "DS_UPLOAD_001": return .uploadHashMismatch
-        case "DS_UPLOAD_005", "DS_RATE_001", "DS_AUD_001": return .retryable
+        case "DS_UPLOAD_005", "DS_RATE_001", "DS_AUD_001", "DS_IDEMPOTENCY_003": return .retryable
         case "DS_DEVICE_001": return .reEnrol
         case "DS_DEVICE_002", "DS_DEVICE_003", "DS_DEVICE_004", "DS_DEVICE_005", "DS_AUTH_003":
             return .unauthorized

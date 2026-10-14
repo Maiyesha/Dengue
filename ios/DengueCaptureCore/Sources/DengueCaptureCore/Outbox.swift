@@ -6,6 +6,8 @@ public enum OutboxAction: Equatable {
     /// Caller must run `quarantine(sessionId:keys:sealedPaths:)` with its KeyStore.
     case quarantineRequired(sessionId: UUID)
     case failed
+    /// The server committed (e.g. DS_QG_099); the item is done and the caller must GET the scan to learn the outcome.
+    case refetchScan(sessionId: UUID)
     /// The item is frozen (quarantined, quarantinePending, needsRepeat, or finished); nothing changed.
     case ignoredFrozen
 }
@@ -146,6 +148,10 @@ public final class Outbox {
             }
             try mutate(id) { $0.failureReason = code }
             return .quarantineRequired(sessionId: it.sessionId)
+        case .recaptureExhausted:
+            if Outbox.isFrozen(it.status) { return .ignoredFrozen }
+            try markDone(id)
+            return .refetchScan(sessionId: it.sessionId)
         case .uploadHashMismatch:
             return try fail(id, "DS_UPLOAD_001")
         case .duplicateRecent:

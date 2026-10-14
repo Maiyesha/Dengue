@@ -3,6 +3,23 @@ import Foundation
 // Hand-written Codable mirrors of contracts/openapi-v1.json. Wire format is snake_case (explicit CodingKeys).
 // Date-time fields stay ISO-8601 strings: the caller formats requests and the server formats responses.
 
+/// Wire date-time format: ISO-8601 UTC with Z and millisecond fraction on output; fraction optional on input.
+public enum WireDate {
+    private static func formatter(fractional: Bool) -> ISO8601DateFormatter {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.formatOptions = fractional ? [.withInternetDateTime, .withFractionalSeconds] : [.withInternetDateTime]
+        return f
+    }
+    public static func string(from date: Date) -> String { formatter(fractional: true).string(from: date) }
+    public static func date(from string: String) -> Date? {
+        formatter(fractional: true).date(from: string) ?? formatter(fractional: false).date(from: string)
+    }
+}
+
+/// Request bodies carry UUIDs lowercase: the server compares raw strings.
+private func lower(_ u: UUID) -> String { u.uuidString.lowercased() }
+
 public enum CaptureStepName: String, Codable, Equatable {
     case neutralFace = "neutral_face"
     case fingertipPPG = "fingertip_ppg"
@@ -134,6 +151,23 @@ public struct CreateScanRequest: Codable, Equatable {
         case offline, protocolVersion = "protocol_version", captureSteps = "capture_steps"
         case deviceAttempts = "device_attempts", metadata
     }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(lower(clientSessionId), forKey: .clientSessionId)
+        try c.encode(lower(patientId), forKey: .patientId)
+        try c.encode(capturedAt, forKey: .capturedAt)
+        try c.encode(offline, forKey: .offline)
+        try c.encode(protocolVersion, forKey: .protocolVersion)
+        try c.encode(captureSteps, forKey: .captureSteps)
+        try c.encode(deviceAttempts, forKey: .deviceAttempts)
+        try c.encode(metadata, forKey: .metadata)
+    }
+    public init(clientSessionId: UUID, patientId: UUID, capturedAt: Date, offline: Bool, protocolVersion: String,
+                captureSteps: [CaptureStepName], deviceAttempts: [DeviceAttempt], metadata: ScanMetadata) {
+        self.init(clientSessionId: clientSessionId, patientId: patientId, capturedAt: WireDate.string(from: capturedAt),
+                  offline: offline, protocolVersion: protocolVersion, captureSteps: captureSteps,
+                  deviceAttempts: deviceAttempts, metadata: metadata)
+    }
 }
 
 public struct ScanSummary: Codable, Equatable {
@@ -248,6 +282,21 @@ public struct VitalObservation: Codable, Equatable {
         case sourceDeviceType = "source_device_type", measuredAt = "measured_at"
         case scanClientSessionId = "scan_client_session_id"
     }
+    public init(observationId: UUID, vital: VitalKind, value: Double, sourceDeviceType: String,
+                measuredAt: Date, scanClientSessionId: UUID? = nil) {
+        self.init(observationId: observationId, vital: vital, value: value, sourceDeviceType: sourceDeviceType,
+                  measuredAt: WireDate.string(from: measuredAt), scanClientSessionId: scanClientSessionId)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(lower(observationId), forKey: .observationId)
+        try c.encode(vital, forKey: .vital)
+        try c.encode(value, forKey: .value)
+        try c.encode(unit, forKey: .unit)
+        try c.encode(sourceDeviceType, forKey: .sourceDeviceType)
+        try c.encode(measuredAt, forKey: .measuredAt)
+        try c.encodeIfPresent(scanClientSessionId.map(lower), forKey: .scanClientSessionId)
+    }
 }
 
 public struct LabResult: Codable, Equatable {
@@ -263,6 +312,19 @@ public struct LabResult: Codable, Equatable {
     }
     enum CodingKeys: String, CodingKey {
         case id, test, value, unit, collectedAt = "collected_at", methodology
+    }
+    public init(id: UUID, test: LabKind, value: Double, collectedAt: Date, methodology: String) {
+        self.init(id: id, test: test, value: value, collectedAt: WireDate.string(from: collectedAt),
+                  methodology: methodology)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(lower(id), forKey: .id)
+        try c.encode(test, forKey: .test)
+        try c.encode(value, forKey: .value)
+        try c.encode(unit, forKey: .unit)
+        try c.encode(collectedAt, forKey: .collectedAt)
+        try c.encode(methodology, forKey: .methodology)
     }
 }
 
@@ -348,11 +410,20 @@ public struct ErrorEnvelope: Decodable {
     public struct Body: Decodable {
         public var code: String
         public var message: String?
-        public var detail: [String: JSONValue]?
+        /// Any JSON value or absent; a malformed detail never blocks reading `code`.
+        public var detail: JSONValue?
         public var requestId: String?
         public var traceId: String?
         enum CodingKeys: String, CodingKey {
             case code, message, detail, requestId = "request_id", traceId = "trace_id"
+        }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            code = try c.decode(String.self, forKey: .code)
+            message = try? c.decode(String.self, forKey: .message)
+            detail = try? c.decode(JSONValue.self, forKey: .detail)
+            requestId = try? c.decode(String.self, forKey: .requestId)
+            traceId = try? c.decode(String.self, forKey: .traceId)
         }
     }
     public var error: Body

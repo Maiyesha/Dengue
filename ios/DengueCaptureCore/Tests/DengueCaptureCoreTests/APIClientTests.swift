@@ -120,10 +120,87 @@ final class APIClientTests: XCTestCase {
         await assertError(400, Data("nope".utf8), .invalid(code: ""))
     }
 
-    func testQualityGateReasonCodesFromDetail() async {
-        await assertError(422, envelope("DS_QG_099", detail: #"{"reason_codes":["DS_QG_001","DS_RPPG_001","bogus"]}"#),
-                          .needsRepeat([.dsQG001, .dsRPPG001]))
+    func testQG099ParsesRecaptureExhaustedDetail() async {
+        await assertError(422, envelope("DS_QG_099", detail: #"{"unable_to_acquire":["neutral_face"],"recaptured":["fingertip_ppg"],"status":"partial"}"#),
+                          .recaptureExhausted(unableToAcquire: ["neutral_face"], recaptured: ["fingertip_ppg"], status: "partial"))
         await assertError(422, envelope("DS_QG_001"), .needsRepeat([.dsQG001]))
+    }
+
+    func testMalformedDetailDoesNotBlockCode() async {
+        await assertError(451, Data(#"{"error":{"code":"DS_REG_001","detail":[1,2,"x"]}}"#.utf8), .stopAndQuarantine(code: "DS_REG_001"))
+        await assertError(451, Data(#"{"error":{"code":"DS_REG_001","detail":"str","message":5}}"#.utf8), .stopAndQuarantine(code: "DS_REG_001"))
+        await assertError(451, Data(#"{"error":{"code":"DS_REG_001"}}"#.utf8), .stopAndQuarantine(code: "DS_REG_001"))
+    }
+
+    func testIdempotencyCodes() async {
+        await assertError(409, envelope("DS_IDEMPOTENCY_003"), .retryable)
+        await assertError(409, envelope("DS_IDEMPOTENCY_001"), .invalid(code: "DS_IDEMPOTENCY_001"))
+        await assertError(400, envelope("DS_IDEMPOTENCY_002"), .invalid(code: "DS_IDEMPOTENCY_002"))
+    }
+
+    func testUndecodable2xxIsRetryable() async {
+        StubProtocol.handler = { _ in (200, Data("not json".utf8)) }
+        do { _ = try await makeAPI().getScan(id: uid); XCTFail() } catch {
+            XCTAssertEqual(error as? APIError, .retryable)
+        }
+    }
+
+    func testRequestBodyUUIDsAreLowercase() async throws {
+        let hexy = UUID(uuidString: "ABCDEF12-ABCD-4BCD-8BCD-ABCDEF123456")!
+        let low = "abcdef12-abcd-4bcd-8bcd-abcdef123456"
+        StubProtocol.handler = { c in
+            let p = c.request.url!.path
+            if p.hasSuffix("/v1/scans") { return (201, Data(#"{"scan":{"id":"\#(low)","status":"capture_pending","client_session_id":"\#(low)"}}"#.utf8)) }
+            if p.hasSuffix("clinical-data") { return (201, Data(#"{"accepted":1,"duplicates":0,"invalid":[]}"#.utf8)) }
+            if p.hasSuffix("/review") { return (201, Data(#"{"review_id":"\#(low)","scan_id":"\#(low)","status":"reviewed","push":"sent"}"#.utf8)) }
+            if p.hasSuffix("assert") { return (200, Data(#"{"device_token":"t","expires_in":86400}"#.utf8)) }
+            return (204, Data())
+        }
+        let api = makeAPI()
+        var req = scanRequest()
+        req.clientSessionId = hexy; req.patientId = hexy
+        _ = try await api.createScan(req, idempotencyKey: "k")
+        let obs = VitalObservation(observationId: hexy, vital: .hr, value: 80, sourceDeviceType: "m", measuredAt: Date(timeIntervalSince1970: 0), scanClientSessionId: hexy)
+        let lab = LabResult(id: hexy, test: .haemoglobin, value: 12, collectedAt: Date(timeIntervalSince1970: 0), methodology: "x")
+        _ = try await api.postClinicalData(patientId: hexy, request: ClinicalDataRequest(observations: [obs], labs: [lab]), idempotencyKey: "k")
+        _ = try await api.review(scanId: hexy, challengeId: hexy, action: .confirm, reasonCode: nil, note: nil, webauthnAssertion: [:], idempotencyKey: "k")
+        try await api.registerPushToken(deviceId: hexy, apnsToken: String(repeating: "a", count: 64), idempotencyKey: "k")
+        _ = try await api.assert(deviceId: hexy, assertion: "AAAA", challenge: "AAAA")
+        XCTAssertEqual(StubProtocol.captured.count, 5)
+        for c in StubProtocol.captured {
+            let text = String(decoding: try XCTUnwrap(c.body), as: UTF8.self)
+            XCTAssertFalse(text.contains("ABCDEF12"), text)
+            XCTAssertTrue(text.contains(low), text)
+            XCTAssertFalse(c.request.url!.path.contains("ABCDEF"))
+        }
+    }
+
+    func testAssertAuthEnrolmentVsRenewal() async throws {
+        StubProtocol.handler = { _ in (200, Data(#"{"device_token":"t","expires_in":86400}"#.utf8)) }
+        let api = makeAPI()
+        _ = try await api.assert(deviceId: uid, assertion: "AAAA", challenge: "AAAA", asUser: true)
+        _ = try await api.assert(deviceId: uid, assertion: "AAAA", challenge: "AAAA", asUser: false)
+        XCTAssertEqual(StubProtocol.captured[0].request.value(forHTTPHeaderField: "Authorization"), "Bearer U")
+        XCTAssertNil(StubProtocol.captured[1].request.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testGetScanDeviceAuth() async throws {
+        StubProtocol.handler = { _ in (200, self.fixture(for: "/v1/scans/{id}", method: "GET")) }
+        let api = makeAPI()
+        _ = try await api.getScan(id: uid, auth: .device)
+        _ = try await api.getScan(id: uid)
+        XCTAssertEqual(StubProtocol.captured[0].request.value(forHTTPHeaderField: "Authorization"), "Bearer D")
+        XCTAssertEqual(StubProtocol.captured[1].request.value(forHTTPHeaderField: "Authorization"), "Bearer U")
+    }
+
+    func testWireDateFormat() {
+        XCTAssertEqual(WireDate.string(from: Date(timeIntervalSince1970: 0)), "1970-01-01T00:00:00.000Z")
+        XCTAssertEqual(WireDate.string(from: Date(timeIntervalSince1970: 1_800_000_000.5)), "2027-01-15T08:00:00.500Z")
+        XCTAssertEqual(WireDate.date(from: "2026-01-01T00:00:00Z"), Date(timeIntervalSince1970: 1_767_225_600))
+        XCTAssertNotNil(WireDate.date(from: "2026-01-01T00:00:00.123Z"))
+        let req = CreateScanRequest(clientSessionId: uid, patientId: uid, capturedAt: Date(timeIntervalSince1970: 0), offline: false,
+                                    protocolVersion: "1", captureSteps: [.neutralFace], deviceAttempts: [], metadata: scanRequest().metadata)
+        XCTAssertEqual(req.capturedAt, "1970-01-01T00:00:00.000Z")
     }
 
     func testOtherCodes() async {

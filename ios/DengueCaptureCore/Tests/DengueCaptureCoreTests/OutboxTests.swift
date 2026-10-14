@@ -115,6 +115,17 @@ final class OutboxTests: XCTestCase {
         XCTAssertNil(try ob.nextReady())
     }
 
+    func testRecaptureExhaustedMarksDoneAndRefetches() throws {
+        let ob = try makeOutbox()
+        let s = UUID()
+        let item = try ob.enqueue(.completeArtefact, sessionId: s, payload: Data(), dependsOn: nil)
+        let err = APIError.from(code: "DS_QG_099", httpStatus: 422,
+                                detail: ["unable_to_acquire": .array([.string("neutral_face")]), "recaptured": .array([]), "status": .string("partial")])
+        XCTAssertEqual(err, .recaptureExhausted(unableToAcquire: ["neutral_face"], recaptured: [], status: "partial"))
+        XCTAssertEqual(try ob.apply(err, to: item.id), .refetchScan(sessionId: s))
+        XCTAssertEqual(try XCTUnwrap(ob.item(item.id)).status, .done)
+    }
+
     func testItemsSurviveReopening() throws {
         let s = UUID()
         let scan = try makeOutbox().enqueue(.createScan, sessionId: s, payload: Data("p".utf8), dependsOn: nil)
@@ -176,7 +187,13 @@ final class APIErrorTests: XCTestCase {
     }
 
     func testExplicitReasonCodesWin() {
-        XCTAssertEqual(APIError.from(code: "DS_QG_099", httpStatus: 422, reasonCodes: [.dsQG001, .dsQG002]),
+        XCTAssertEqual(APIError.from(code: "DS_QG_002", httpStatus: 422, reasonCodes: [.dsQG001, .dsQG002]),
                        .needsRepeat([.dsQG001, .dsQG002]))
+    }
+
+    func testIdempotency003IsRetryableOthersInvalid() {
+        XCTAssertEqual(APIError.from(code: "DS_IDEMPOTENCY_003", httpStatus: 409), .retryable)
+        XCTAssertEqual(APIError.from(code: "DS_IDEMPOTENCY_001", httpStatus: 409), .invalid(code: "DS_IDEMPOTENCY_001"))
+        XCTAssertEqual(APIError.from(code: "DS_IDEMPOTENCY_002", httpStatus: 400), .invalid(code: "DS_IDEMPOTENCY_002"))
     }
 }

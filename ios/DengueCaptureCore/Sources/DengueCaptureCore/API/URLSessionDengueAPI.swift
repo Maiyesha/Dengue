@@ -63,13 +63,9 @@ public final class URLSessionDengueAPI: DengueAPI {
     /// Envelope code wins; a non-JSON body maps by HTTP status alone.
     static func decodeError(data: Data, status: Int) -> APIError {
         if let env = try? JSONDecoder().decode(ErrorEnvelope.self, from: data) {
-            var reasons: [ReasonCode] = []
-            if case .array(let arr)? = env.error.detail?["reason_codes"] {
-                for v in arr {
-                    if case .string(let s) = v, let rc = ReasonCode(rawValue: s) { reasons.append(rc) }
-                }
-            }
-            return APIError.from(code: env.error.code, httpStatus: status, reasonCodes: reasons)
+            var detail: [String: JSONValue]?
+            if case .object(let o)? = env.error.detail { detail = o }
+            return APIError.from(code: env.error.code, httpStatus: status, detail: detail)
         }
         return APIError.from(code: "", httpStatus: status)
     }
@@ -80,7 +76,7 @@ public final class URLSessionDengueAPI: DengueAPI {
         let data = try body.map { try JSONEncoder().encode(AnyEncodable($0)) }
         let out = try await send(method: method, path: path, query: query, body: data, auth: auth,
                                  idempotencyKey: idempotencyKey)
-        do { return try JSONDecoder().decode(T.self, from: out) } catch { throw APIError.invalid(code: "DECODE") }
+        do { return try JSONDecoder().decode(T.self, from: out) } catch { throw APIError.retryable }  // same key replays the stored response
     }
 
     private struct AnyEncodable: Encodable {
@@ -116,8 +112,8 @@ public final class URLSessionDengueAPI: DengueAPI {
                        idempotencyKey: idempotencyKey)
     }
 
-    public func getScan(id: UUID) async throws -> ScanResponse {
-        try await call(ScanResponse.self, method: "GET", path: "/v1/scans/\(Self.id(id))", auth: .user)
+    public func getScan(id: UUID, auth: AuthKind) async throws -> ScanResponse {
+        try await call(ScanResponse.self, method: "GET", path: "/v1/scans/\(Self.id(id))", auth: auth)
     }
 
     public func recapture(scanId: UUID, steps: [CaptureStepName], reason: String,
@@ -168,18 +164,18 @@ public final class URLSessionDengueAPI: DengueAPI {
     public func review(scanId: UUID, challengeId: UUID, action: ReviewAction, reasonCode: String?, note: String?,
                        webauthnAssertion: [String: JSONValue], idempotencyKey: String) async throws -> ReviewResponse {
         struct Body: Encodable {
-            let challenge_id: UUID; let action: ReviewAction; let reason_code: String?; let note: String?
+            let challenge_id: String; let action: ReviewAction; let reason_code: String?; let note: String?
             let webauthn_assertion: [String: JSONValue]
         }
         return try await call(ReviewResponse.self, method: "POST", path: "/v1/scans/\(Self.id(scanId))/review",
-                              body: Body(challenge_id: challengeId, action: action, reason_code: reasonCode,
+                              body: Body(challenge_id: Self.id(challengeId), action: action, reason_code: reasonCode,
                                          note: note, webauthn_assertion: webauthnAssertion),
                               auth: .user, idempotencyKey: idempotencyKey)
     }
 
     public func registerPushToken(deviceId: UUID, apnsToken: String, idempotencyKey: String) async throws {
-        struct Body: Encodable { let device_id: UUID; let apns_token: String }
-        let data = try JSONEncoder().encode(Body(device_id: deviceId, apns_token: apnsToken))
+        struct Body: Encodable { let device_id: String; let apns_token: String }
+        let data = try JSONEncoder().encode(Body(device_id: Self.id(deviceId), apns_token: apnsToken))
         _ = try await send(method: "POST", path: "/v1/devices/push-token", body: data, auth: .device,
                            idempotencyKey: idempotencyKey)
     }
@@ -197,10 +193,11 @@ public final class URLSessionDengueAPI: DengueAPI {
                               auth: .user, idempotencyKey: idempotencyKey)
     }
 
-    public func assert(deviceId: UUID, assertion: String, challenge: String) async throws -> AssertResponse {
-        struct Body: Encodable { let device_id: UUID; let assertion: String; let challenge: String }
+    public func assert(deviceId: UUID, assertion: String, challenge: String, asUser: Bool) async throws -> AssertResponse {
+        struct Body: Encodable { let device_id: String; let assertion: String; let challenge: String }
         return try await call(AssertResponse.self, method: "POST", path: "/v1/devices/assert",
-                              body: Body(device_id: deviceId, assertion: assertion, challenge: challenge), auth: .none)
+                              body: Body(device_id: Self.id(deviceId), assertion: assertion, challenge: challenge),
+                              auth: asUser ? .user : .none)
     }
 
     public func renewalChallenge(deviceId: UUID) async throws -> DeviceChallengeResponse {

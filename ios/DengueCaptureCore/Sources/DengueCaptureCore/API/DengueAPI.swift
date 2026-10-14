@@ -10,11 +10,11 @@ public enum AuthKind: Equatable {
 }
 
 /// Async API surface. Auth per route (contract `x-auth`):
-/// - user: lookup, roster, consentStatus, createScan, getScan, recapture, postClinicalData, experimental,
+/// - user: lookup, roster, consentStatus, createScan, getScan (default; pass .device for verdict polling), recapture, postClinicalData, experimental,
 ///   reviewChallenge, review, deviceChallenge, attest
 /// - device (route also accepts user): declareArtefact, partURL, completeArtefact
 /// - device only: registerPushToken
-/// - none: renewalChallenge, assert (assert's user token is optional; the device proves itself by assertion)
+/// - none: renewalChallenge; assert is user-bearer at enrolment (asUser: true) and unauthenticated for renewal
 /// POSTs listed with an `Idempotency-Key` take a caller-supplied key; partURL, assert, renewalChallenge and
 /// reviewChallenge are idempotency-exempt.
 public protocol DengueAPI {
@@ -22,7 +22,7 @@ public protocol DengueAPI {
     func roster(wardId: String) async throws -> Roster
     func consentStatus(patientId: UUID) async throws -> ConsentStatus
     func createScan(_ request: CreateScanRequest, idempotencyKey: String) async throws -> CreateScanResponse
-    func getScan(id: UUID) async throws -> ScanResponse
+    func getScan(id: UUID, auth: AuthKind) async throws -> ScanResponse
     func recapture(scanId: UUID, steps: [CaptureStepName], reason: String, idempotencyKey: String) async throws -> ScanResponse
     func declareArtefact(scanId: UUID, request: DeclareArtefactRequest, idempotencyKey: String) async throws -> DeclareArtefactResponse
     func partURL(artefactId: UUID, part: Int) async throws -> PartURLResponse
@@ -35,6 +35,14 @@ public protocol DengueAPI {
     func registerPushToken(deviceId: UUID, apnsToken: String, idempotencyKey: String) async throws
     func deviceChallenge(idempotencyKey: String) async throws -> DeviceChallengeResponse
     func attest(keyId: String, attestation: String, challenge: String, wardId: String, idempotencyKey: String) async throws -> AttestResponse
-    func assert(deviceId: UUID, assertion: String, challenge: String) async throws -> AssertResponse
+    /// `asUser: true` (enrolment, after attest) sends the user bearer; renewal (`false`) sends no Authorization.
+    func assert(deviceId: UUID, assertion: String, challenge: String, asUser: Bool) async throws -> AssertResponse
     func renewalChallenge(deviceId: UUID) async throws -> DeviceChallengeResponse
+}
+
+public extension DengueAPI {
+    func getScan(id: UUID) async throws -> ScanResponse { try await getScan(id: id, auth: .user) }
+    func assert(deviceId: UUID, assertion: String, challenge: String) async throws -> AssertResponse {
+        try await assert(deviceId: deviceId, assertion: assertion, challenge: challenge, asUser: false)
+    }
 }
