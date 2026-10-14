@@ -144,7 +144,10 @@ describe('row level security', () => {
   it('system_agent reads and updates scans across sites but sees no patients', async () => {
     await as('system_agent', async (c) => {
       expect(await count(c, 'SELECT * FROM scans WHERE id IN ($1,$2)', [SCAN_A, SCAN_B])).toBe(2);
-      const u = await c.query(`UPDATE scans SET status='quality_pending' WHERE id IN ($1,$2)`, [SCAN_A, SCAN_B]);
+      // capture_pending -> quality_pending is a site-role transition (0007); system_agent
+      // owns quality_pending -> quality_passed.
+      await asSuper(c, `UPDATE scans SET status='quality_pending' WHERE id IN ($1,$2)`, [SCAN_A, SCAN_B]);
+      const u = await c.query(`UPDATE scans SET status='quality_passed' WHERE id IN ($1,$2)`, [SCAN_A, SCAN_B]);
       expect(u.rowCount).toBe(2);
       expect(await count(c, 'SELECT * FROM patients')).toBe(0);
     });
