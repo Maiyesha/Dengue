@@ -167,37 +167,90 @@ GRANT SELECT ON patient_consent_status TO app_api;
 -- the base tables. Each view gates on app_research_access() itself, and research_definer's
 -- base-table policies repeat the gate (defence in depth). security_barrier stops caller
 -- predicates from being pushed below the gate.
-GRANT SELECT ON patients, scans, features, sqi_checks TO research_definer;
+-- Only participants whose LATEST consent (same rule as patient_consent_status: newest
+-- consented_at, tie-break id) has primary_research = true and is not withdrawn are exposed.
+-- Patients with no consent row, and scans without a patient, are excluded (fail closed).
+GRANT SELECT ON patients, scans, features, sqi_checks, consents TO research_definer;
 
 CREATE POLICY patients_research   ON patients   FOR SELECT TO research_definer USING (app_research_access());
 CREATE POLICY scans_research      ON scans      FOR SELECT TO research_definer USING (app_research_access());
 CREATE POLICY features_research   ON features   FOR SELECT TO research_definer USING (app_research_access());
 CREATE POLICY sqi_checks_research ON sqi_checks FOR SELECT TO research_definer USING (app_research_access());
+CREATE POLICY consents_research   ON consents   FOR SELECT TO research_definer USING (app_research_access());
+
+-- Internal building block; NOT granted to app_api. Nested in the views below, its base
+-- tables are read with research_definer's privileges (it is the owner).
+CREATE VIEW research_consented_patients WITH (security_barrier = true) AS
+SELECT p.id, p.pseudonym_id, p.cohort, p.status, p.site_id
+FROM patients p
+JOIN LATERAL (
+  SELECT c.primary_research, c.withdrawn_at
+  FROM consents c
+  WHERE c.patient_id = p.id
+  ORDER BY c.consented_at DESC, c.id
+  LIMIT 1
+) lc ON true
+WHERE app_research_access()
+  AND lc.primary_research
+  AND lc.withdrawn_at IS NULL;
 
 CREATE VIEW research_patients WITH (security_barrier = true) AS
-SELECT p.pseudonym_id, p.cohort, p.status, split_part(p.site_id, '-', 1) AS site_bucket
-FROM patients p
+SELECT cp.pseudonym_id, cp.cohort, cp.status, split_part(cp.site_id, '-', 1) AS site_bucket
+FROM research_consented_patients cp
 WHERE app_research_access();
 
 CREATE VIEW research_scans WITH (security_barrier = true) AS
-SELECT s.id, split_part(s.site_id, '-', 1) AS site_bucket, s.status, s.captured_at, s.protocol_version
+SELECT s.id, cp.pseudonym_id, split_part(s.site_id, '-', 1) AS site_bucket,
+       s.status, s.captured_at, s.protocol_version
 FROM scans s
+JOIN research_consented_patients cp ON cp.id = s.patient_id
 WHERE app_research_access();
 
 CREATE VIEW research_features WITH (security_barrier = true) AS
 SELECT f.scan_id, f.domain, f.name, f.value, f.pipeline_version, f.feature_availability_timestamp
 FROM features f
+JOIN scans s ON s.id = f.scan_id
+JOIN research_consented_patients cp ON cp.id = s.patient_id
 WHERE app_research_access();
 
 CREATE VIEW research_sqi_checks WITH (security_barrier = true) AS
 SELECT q.scan_id, q.step, q.attempt, q.check_id, q.source, q.passed, q.metric_value, q.threshold, q.reason_code
 FROM sqi_checks q
+JOIN scans s ON s.id = q.scan_id
+JOIN research_consented_patients cp ON cp.id = s.patient_id
 WHERE app_research_access();
 
-ALTER VIEW research_patients   OWNER TO research_definer;
-ALTER VIEW research_scans      OWNER TO research_definer;
-ALTER VIEW research_features   OWNER TO research_definer;
-ALTER VIEW research_sqi_checks OWNER TO research_definer;
+ALTER VIEW research_consented_patients OWNER TO research_definer;
+ALTER VIEW research_patients           OWNER TO research_definer;
+ALTER VIEW research_scans              OWNER TO research_definer;
+ALTER VIEW research_features           OWNER TO research_definer;
+ALTER VIEW research_sqi_checks         OWNER TO research_definer;
 
-REVOKE ALL ON research_patients, research_scans, research_features, research_sqi_checks FROM PUBLIC;
+REVOKE ALL ON research_consented_patients, research_patients, research_scans,
+              research_features, research_sqi_checks FROM PUBLIC;
 GRANT SELECT ON research_patients, research_scans, research_features, research_sqi_checks TO app_api;
+
+-- ---------------------------------------------------------------- immutable linkage columns
+-- Policies alone cannot stop system_agent (table-wide UPDATE) from re-pointing rows to another
+-- site/patient/scan; FK checks ignore RLS. These columns are immutable for every role.
+CREATE FUNCTION forbid_column_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE col text;
+BEGIN
+  FOREACH col IN ARRAY TG_ARGV LOOP
+    IF to_jsonb(NEW) -> col IS DISTINCT FROM to_jsonb(OLD) -> col THEN
+      RAISE EXCEPTION 'DS_STATE_002: %.% is immutable', TG_TABLE_NAME, col
+        USING ERRCODE = 'P0001';
+    END IF;
+  END LOOP;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER scans_immutable_links BEFORE UPDATE ON scans
+FOR EACH ROW EXECUTE FUNCTION forbid_column_change('site_id', 'patient_id');
+CREATE TRIGGER artefacts_immutable_links BEFORE UPDATE ON artefacts
+FOR EACH ROW EXECUTE FUNCTION forbid_column_change('scan_id');
+CREATE TRIGGER sqi_checks_immutable_links BEFORE UPDATE ON sqi_checks
+FOR EACH ROW EXECUTE FUNCTION forbid_column_change('scan_id');
+CREATE TRIGGER features_immutable_links BEFORE UPDATE ON features
+FOR EACH ROW EXECUTE FUNCTION forbid_column_change('scan_id');

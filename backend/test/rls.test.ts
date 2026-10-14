@@ -19,6 +19,16 @@ const as = <T>(role: Role, fn: (c: pg.PoolClient) => Promise<T>, siteId?: string
 const count = async (c: pg.PoolClient, sql: string, params: unknown[] = []) =>
   (await c.query(`SELECT count(*)::int AS n FROM (${sql}) q`, params)).rows[0].n as number;
 
+/** Runs sql as the superuser inside asRole's transaction (rolled back with it). */
+const asSuper = async (c: pg.PoolClient, sql: string, params: unknown[] = []) => {
+  await c.query('RESET ROLE');
+  try {
+    return await c.query(sql, params);
+  } finally {
+    await c.query('SET LOCAL ROLE app_api');
+  }
+};
+
 const insertReview = (c: pg.PoolClient, scanId: string, reviewer: string) =>
   c.query(
     `INSERT INTO scan_reviews(scan_id,reviewer_user_id,action,webauthn_assertion_hash)
@@ -113,7 +123,7 @@ describe('row level security', () => {
       await as(role, async (c) => {
         const r = await c.query('SELECT * FROM research_scans WHERE id IN ($1,$2)', [SCAN_A, SCAN_B]);
         expect(r.rows).toHaveLength(2);
-        expect(r.fields.map((f) => f.name).sort()).toEqual(['captured_at', 'id', 'protocol_version', 'site_bucket', 'status']);
+        expect(r.fields.map((f) => f.name).sort()).toEqual(['captured_at', 'id', 'protocol_version', 'pseudonym_id', 'site_bucket', 'status']);
         const f = await c.query('SELECT * FROM research_features LIMIT 0');
         expect(f.fields.map((x) => x.name).sort()).toEqual(
           ['domain', 'feature_availability_timestamp', 'name', 'pipeline_version', 'scan_id', 'value'],
@@ -170,6 +180,106 @@ describe('row level security', () => {
   it('app_api still has no access to the vault', async () => {
     await expect(
       as('admin', (c) => c.query('SELECT * FROM vault.patient_identifiers')),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  // ---- fix round 1: immutable linkage columns ----
+  it('system_agent cannot change scans.site_id (DS_STATE_002)', async () => {
+    await expect(
+      as('system_agent', (c) => c.query('UPDATE scans SET site_id=$1 WHERE id=$2', [SITE_B, SCAN_A])),
+    ).rejects.toThrow(/DS_STATE_002/);
+  });
+
+  it('system_agent cannot change scans.patient_id (DS_STATE_002)', async () => {
+    await expect(
+      as('system_agent', (c) => c.query('UPDATE scans SET patient_id=$1 WHERE id=$2', [PATIENT_B, SCAN_A])),
+    ).rejects.toThrow(/DS_STATE_002/);
+  });
+
+  it('system_agent cannot change features.scan_id (DS_STATE_002)', async () => {
+    await expect(
+      as('system_agent', async (c) => {
+        await c.query(
+          `INSERT INTO features(scan_id,domain,name,value,pipeline_version,feature_availability_timestamp)
+           VALUES ($1,'rppg_face','hr_bpm',72,'pv1',now())`,
+          [SCAN_A],
+        );
+        expect(await count(c, 'SELECT * FROM features WHERE scan_id=$1', [SCAN_A])).toBe(1);
+        await c.query('UPDATE features SET scan_id=$1 WHERE scan_id=$2', [SCAN_B, SCAN_A]);
+      }),
+    ).rejects.toThrow(/DS_STATE_002/);
+  });
+
+  it('system_agent can still update non-linkage columns of features', async () => {
+    await as('system_agent', async (c) => {
+      await c.query(
+        `INSERT INTO features(scan_id,domain,name,value,pipeline_version,feature_availability_timestamp)
+         VALUES ($1,'rppg_face','hr_bpm',72,'pv1',now())`,
+        [SCAN_A],
+      );
+      const u = await c.query(`UPDATE features SET value=73 WHERE scan_id=$1`, [SCAN_A]);
+      expect(u.rowCount).toBe(1);
+    });
+  });
+
+  it('linkage columns are immutable for site roles too', async () => {
+    await expect(
+      as('clinician', (c) => c.query('UPDATE scans SET patient_id=NULL WHERE id=$1', [SCAN_A]), SITE_A),
+    ).rejects.toThrow(/DS_STATE_002/);
+  });
+
+  // ---- fix round 1: consent-gated research views ----
+  it('research_patients and research_scans hide a withdrawn participant', async () => {
+    await as('researcher', async (c) => {
+      expect(await count(c, 'SELECT * FROM research_patients WHERE pseudonym_id=$1', ['ps-rls-a'])).toBe(1);
+      expect(await count(c, 'SELECT * FROM research_scans WHERE id=$1', [SCAN_A])).toBe(1);
+      await asSuper(
+        c,
+        `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at,withdrawn_at)
+         VALUES ($1,'rls-v1',true,now(),now())`,
+        [PATIENT_A],
+      );
+      expect(await count(c, 'SELECT * FROM research_patients WHERE pseudonym_id=$1', ['ps-rls-a'])).toBe(0);
+      expect(await count(c, 'SELECT * FROM research_scans WHERE id=$1', [SCAN_A])).toBe(0);
+      // Other site's participant is unaffected.
+      expect(await count(c, 'SELECT * FROM research_scans WHERE id=$1', [SCAN_B])).toBe(1);
+    });
+  });
+
+  it('research views hide a participant whose latest consent has primary_research=false', async () => {
+    await as('biostatistician', async (c) => {
+      await asSuper(
+        c,
+        `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at)
+         VALUES ($1,'rls-v1',false,now())`,
+        [PATIENT_B],
+      );
+      expect(await count(c, 'SELECT * FROM research_patients WHERE pseudonym_id=$1', ['ps-rls-b'])).toBe(0);
+      expect(await count(c, 'SELECT * FROM research_scans WHERE id=$1', [SCAN_B])).toBe(0);
+    });
+  });
+
+  it('research views hide a participant with no consent row', async () => {
+    await as('researcher', async (c) => {
+      await asSuper(c, 'DELETE FROM consents WHERE patient_id=$1', [PATIENT_B]);
+      expect(await count(c, 'SELECT * FROM research_patients WHERE pseudonym_id=$1', ['ps-rls-b'])).toBe(0);
+    });
+  });
+
+  it('research_scans exposes pseudonym_id but not participant_code', async () => {
+    await as('researcher', async (c) => {
+      const r = await c.query('SELECT * FROM research_scans WHERE id=$1', [SCAN_A]);
+      const cols = r.fields.map((f) => f.name);
+      expect(cols).toContain('pseudonym_id');
+      expect(cols).not.toContain('participant_code');
+      expect(cols).not.toContain('patient_id');
+      expect(r.rows[0].pseudonym_id).toBe('ps-rls-a');
+    });
+  });
+
+  it('app_api cannot read the internal research_consented_patients view', async () => {
+    await expect(
+      as('researcher', (c) => c.query('SELECT * FROM research_consented_patients')),
     ).rejects.toMatchObject({ code: '42501' });
   });
 });
