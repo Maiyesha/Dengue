@@ -7,30 +7,33 @@ import { ApiError } from '../errors';
 import { actorOf, requireUser, type Actor } from '../auth';
 import { withRls } from '../db';
 import { audit, NO_PATIENT } from '../audit';
+import { consentBlock, type ConsentStatusRow } from '../consentGate';
 
 const notFound = () => new ApiError(404, 'DS_NOT_FOUND', 'Resource not found');
 const PARTICIPANT_CODE = /^DS-[A-Z]+-[0-9]{5}$/;
 
-interface ConsentRow {
-  primary_research: boolean;
-  consent_version: string;
-  current_version: string;
-  withdrawn: boolean;
-}
-
-const consentBody = (r: ConsentRow | undefined, checkedAt: string) => ({
-  primary_research: r?.primary_research ?? false,
-  consent_version: r?.consent_version ?? '',
-  current_version: r?.current_version ?? '',
-  withdrawn: r?.withdrawn ?? false,
-  checked_at: checkedAt,
-});
+/**
+ * Consent as shown to the ward app. capture_allowed / block_code (M4) come from consentBlock(),
+ * the same rule the capture gate (POST /v1/scans, scan_consent_rejection) applies.
+ */
+const consentBody = (r: ConsentStatusRow | undefined, checkedAt: string) => {
+  const block = consentBlock(r);
+  return {
+    primary_research: r?.primary_research ?? false,
+    consent_version: r?.consent_version ?? '',
+    current_version: r?.current_version ?? '',
+    withdrawn: r?.withdrawn ?? false,
+    capture_allowed: block === null,
+    block_code: block,
+    checked_at: checkedAt,
+  };
+};
 
 const auditRead = (c: pg.PoolClient, a: Actor, pseudonym: string, type: string, id: string) =>
   audit(c, {
     eventType: 'data_access',
     actorId: a.id,
-    actorRole: a.roles[0],
+    actorRole: a.role,
     patientPseudonym: pseudonym,
     resourceType: type,
     resourceId: id,

@@ -131,7 +131,7 @@ export async function clinicalDataRoutes(app: FastifyInstance): Promise<void> {
         await audit(c, {
           eventType: 'clinician_action',
           actorId: actor.id,
-          actorRole: actor.roles[0],
+          actorRole: actor.role,
           patientPseudonym: p.pseudonym_id,
           resourceType: 'patient',
           resourceId: p.id,

@@ -1,3 +1,4 @@
+import { Writable } from 'node:stream';
 import { describe, it, expect, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app';
@@ -8,7 +9,7 @@ const deps = { now: () => new Date('2026-10-14T00:00:00Z') } as unknown as AppDe
 describe('app skeleton', () => {
   let app: FastifyInstance;
   const make = async (extra?: (a: FastifyInstance) => void) => {
-    app = buildApp(deps);
+    app = buildApp(deps, { logLevel: 'silent' });
     extra?.(app);
     await app.ready();
     return app;
@@ -53,6 +54,58 @@ describe('app skeleton', () => {
     expect(res.body).not.toContain('secret db failure');
     expect(res.body).not.toContain('at ');
     await a.close();
+  });
+
+  it('M2: other Fastify 4xx (415 media type) -> 400 DS_VALIDATION_001; 413 -> 413 DS_VALIDATION_002', async () => {
+    const { z } = await import('zod');
+    const a = await make((x) => {
+      x.post('/v', { schema: { body: z.object({ n: z.number() }).strict() } }, async () => ({}));
+    });
+    const media = await a.inject({ method: 'POST', url: '/v', headers: { 'content-type': 'text/plain' }, payload: 'n=1' });
+    expect(media.statusCode).toBe(400);
+    expect(media.json().error.code).toBe('DS_VALIDATION_001');
+    const big = await a.inject({
+      method: 'POST',
+      url: '/v',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ n: 1, pad: 'x'.repeat(1_100_000) }),
+    });
+    expect(big.statusCode).toBe(413);
+    expect(big.json().error.code).toBe('DS_VALIDATION_002');
+    const badJson = await a.inject({ method: 'POST', url: '/v', headers: { 'content-type': 'application/json' }, payload: '{"n":' });
+    expect(badJson.statusCode).toBe(400);
+    expect(badJson.json().error.code).toBe('DS_VALIDATION_001');
+    await a.close();
+  });
+
+  it('M3: logger on; 500s are logged with authorization and cookie headers redacted', async () => {
+    const lines: string[] = [];
+    const stream = new Writable({
+      write(chunk, _enc, cb) {
+        lines.push(String(chunk));
+        cb();
+      },
+    });
+    const a = buildApp(deps, { logStream: stream, logLevel: 'info' });
+    a.get('/boom', async () => {
+      throw new Error('secret db failure');
+    });
+    await a.ready();
+    const res = await a.inject({
+      method: 'GET',
+      url: '/boom',
+      headers: { authorization: 'Bearer very-secret-token', cookie: 'session=cookie-secret' },
+    });
+    expect(res.statusCode).toBe(500);
+    await a.close();
+    const log = lines.join('');
+    const errors = lines.map((l) => JSON.parse(l)).filter((l) => l.level === 50);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].err.message).toBe('secret db failure');
+    expect(errors[0].request.headers.authorization).toBe('[REDACTED]');
+    expect(errors[0].request.headers.cookie).toBe('[REDACTED]');
+    expect(log).not.toContain('very-secret-token');
+    expect(log).not.toContain('cookie-secret');
   });
 
   it('ApiError maps to envelope; zod failure -> 400 DS_VALIDATION_001', async () => {

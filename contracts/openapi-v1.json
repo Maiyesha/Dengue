@@ -47,7 +47,8 @@
           "DS_UPLOAD_003",
           "DS_UPLOAD_004",
           "DS_UPLOAD_005",
-          "DS_VALIDATION_001"
+          "DS_VALIDATION_001",
+          "DS_VALIDATION_002"
         ],
         "type": "string"
       },
@@ -253,6 +254,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -403,6 +414,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -536,6 +557,16 @@
               }
             },
             "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
           },
           "500": {
             "content": {
@@ -686,6 +717,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -793,6 +834,16 @@
               }
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
           },
           "500": {
             "content": {
@@ -909,6 +960,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -1000,6 +1061,16 @@
               }
             },
             "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
           },
           "429": {
             "content": {
@@ -1396,6 +1467,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -1462,6 +1543,25 @@
                 "schema": {
                   "additionalProperties": false,
                   "properties": {
+                    "block_code": {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "DS_REG_001",
+                            "DS_REG_002"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "451 code a capture would get now; null when capture is allowed"
+                    },
+                    "capture_allowed": {
+                      "description": "Same rule as the capture gate: true only when block_code is null",
+                      "type": "boolean"
+                    },
                     "checked_at": {
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
@@ -1485,6 +1585,8 @@
                     "consent_version",
                     "current_version",
                     "withdrawn",
+                    "capture_allowed",
+                    "block_code",
                     "checked_at"
                   ],
                   "type": "object"
@@ -1913,6 +2015,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "451": {
             "content": {
               "application/json": {
@@ -2329,6 +2441,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2611,6 +2733,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2859,6 +2991,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3070,6 +3212,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3228,6 +3380,16 @@
             },
             "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3294,6 +3456,25 @@
                           "consent": {
                             "additionalProperties": false,
                             "properties": {
+                              "block_code": {
+                                "anyOf": [
+                                  {
+                                    "enum": [
+                                      "DS_REG_001",
+                                      "DS_REG_002"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "description": "451 code a capture would get now; null when capture is allowed"
+                              },
+                              "capture_allowed": {
+                                "description": "Same rule as the capture gate: true only when block_code is null",
+                                "type": "boolean"
+                              },
                               "checked_at": {
                                 "format": "date-time",
                                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
@@ -3317,6 +3498,8 @@
                               "consent_version",
                               "current_version",
                               "withdrawn",
+                              "capture_allowed",
+                              "block_code",
                               "checked_at"
                             ],
                             "type": "object"
@@ -3601,7 +3784,12 @@
     {
       "code": "DS_VALIDATION_001",
       "http_status": 400,
-      "meaning": "Request validation failed (unknown field, wrong type, out of range). detail.issues lists the problems."
+      "meaning": "Request validation failed (unknown field, wrong type, out of range, wrong unit, unsupported media type, malformed JSON). detail.issues lists the problems."
+    },
+    {
+      "code": "DS_VALIDATION_002",
+      "http_status": 413,
+      "meaning": "Request payload too large (body over the server limit, 1 MiB)."
     }
   ]
 }

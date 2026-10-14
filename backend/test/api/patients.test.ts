@@ -94,6 +94,18 @@ describe('GET /v1/patients/lookup', () => {
     expect((await app.inject({ method: 'GET', url: '/v1/patients/lookup?participant_code=DS-RLSA-00001' })).statusCode).toBe(401);
   });
 
+  it('M1: audit actor_role is the role that satisfied the guard, not roles[0]', async () => {
+    const tok = await tokenFor('researcher', SITE_A, { extraRoles: ['nurse_operator'] }); // roles [researcher, nurse_operator]
+    const r = await app.inject({ method: 'GET', url: '/v1/patients/lookup?participant_code=DS-RLSA-00001', headers: bearer(tok) });
+    expect(r.statusCode).toBe(200);
+    const a = await pool.query(
+      `SELECT actor_role FROM clinical_audit_log
+        WHERE event_type='data_access' AND resource_id=$1 ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      [PATIENT_A],
+    );
+    expect(a.rows[0].actor_role).toBe('nurse_operator');
+  });
+
   it('is audited as data_access with the patient pseudonym', async () => {
     await get('/v1/patients/lookup?participant_code=DS-RLSA-00001');
     const a = await pool.query(
@@ -115,7 +127,9 @@ describe('GET /v1/wards/:wardId/roster', () => {
     expect(ids).not.toContain(PATIENT_W2);
     expect(typeof b.generated_at).toBe('string');
     const w1 = b.items.find((i: { patient_id: string }) => i.patient_id === PATIENT_W1);
-    expect(w1.consent).toMatchObject({ primary_research: true, consent_version: CONSENT_VERSION, withdrawn: false });
+    expect(w1.consent).toMatchObject({
+      primary_research: true, consent_version: CONSENT_VERSION, withdrawn: false, capture_allowed: true, block_code: null,
+    });
     for (const k of FORBIDDEN_KEYS) expect(allKeys(b)).not.toContain(k);
   });
 
@@ -136,8 +150,39 @@ describe('GET /v1/patients/:id/consent-status', () => {
       consent_version: CONSENT_VERSION,
       current_version: CONSENT_VERSION,
       withdrawn: false,
+      capture_allowed: true,
+      block_code: null,
     });
     expect(typeof r.json().checked_at).toBe('string');
+  });
+
+  it('M4: capture_allowed / block_code follow the scans gate (none, not primary, withdrawn -> DS_REG_001)', async () => {
+    const P = '00000000-0000-4000-a000-0000000000c9';
+    await pool.query(
+      `INSERT INTO patients(id,participant_code,pseudonym_id,site_id,ward_id,cohort) VALUES ($1,'DS-RLSA-00009','ps-rls-m4',$2,$3,'dengue')`,
+      [P, SITE_A, WARD_2],
+    );
+    try {
+      const status = async () => (await get(`/v1/patients/${P}/consent-status`)).json();
+      expect(await status()).toMatchObject({ capture_allowed: false, block_code: 'DS_REG_001' });
+      // Roster entry for a patient without consent carries the same verdict.
+      const roster = (await get(`/v1/wards/${WARD_2}/roster`)).json();
+      expect(roster.items.find((i: { patient_id: string }) => i.patient_id === P).consent)
+        .toMatchObject({ capture_allowed: false, block_code: 'DS_REG_001' });
+      await pool.query(
+        `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at) VALUES ($1,$2,false,now())`, [P, CONSENT_VERSION]);
+      expect(await status()).toMatchObject({ capture_allowed: false, block_code: 'DS_REG_001' });
+      await pool.query(
+        `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at) VALUES ($1,$2,true,now())`, [P, CONSENT_VERSION]);
+      expect(await status()).toMatchObject({ capture_allowed: true, block_code: null });
+      await pool.query(
+        `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at,withdrawn_at) VALUES ($1,$2,true,now(),now())`,
+        [P, CONSENT_VERSION]);
+      expect(await status()).toMatchObject({ capture_allowed: false, block_code: 'DS_REG_001' });
+    } finally {
+      await pool.query('DELETE FROM consents WHERE patient_id = $1', [P]);
+      await pool.query('DELETE FROM patients WHERE id = $1', [P]);
+    }
   });
 
   it('consent-status superseded shows differing versions', async () => {
@@ -151,6 +196,8 @@ describe('GET /v1/patients/:id/consent-status', () => {
     const b = r.json();
     expect(b.consent_version).toBe('rls-v0');
     expect(b.current_version).toBe(CONSENT_VERSION);
+    expect(b.capture_allowed).toBe(false);
+    expect(b.block_code).toBe('DS_REG_002');
   });
 
   it('cross-site / unknown / bad id', async () => {

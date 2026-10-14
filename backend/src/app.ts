@@ -37,9 +37,31 @@ function envelope(req: FastifyRequest, now: () => Date, code: string, message: s
   };
 }
 
-export function buildApp(deps: AppDeps): FastifyInstance {
+export interface BuildOptions {
+  /** pino level; default LOG_LEVEL or 'info'. Tests pass 'silent'. */
+  logLevel?: string;
+  /** Log destination (default stdout). */
+  logStream?: { write(msg: string): void };
+}
+
+/**
+ * Credentials never reach the logs (M3). `req.headers.*` covers any serializer that logs headers;
+ * `request.headers.*` is the shape logged for unhandled errors below.
+ */
+export const LOG_REDACT_PATHS = [
+  'req.headers.authorization',
+  'req.headers.cookie',
+  'request.headers.authorization',
+  'request.headers.cookie',
+];
+
+export function buildApp(deps: AppDeps, opts: BuildOptions = {}): FastifyInstance {
   const app = Fastify({
-    logger: false,
+    logger: {
+      level: opts.logLevel ?? process.env.LOG_LEVEL ?? 'info',
+      redact: { paths: LOG_REDACT_PATHS, censor: '[REDACTED]' },
+      ...(opts.logStream ? { stream: opts.logStream } : {}),
+    },
     genReqId: (req) => traceIdOf(req.headers.traceparent) ?? randomBytes(16).toString('hex'),
   });
   app.decorate('deps', deps);
@@ -64,13 +86,20 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(err.status).send(envelope(req, deps.now, err.code, err.message, err.detail ?? {}));
     }
     const fe = err as FastifyError;
-    if (err instanceof ZodError || fe.validation || fe.statusCode === 400) {
-      const issues = err instanceof ZodError ? err.issues : (fe.validation ?? []);
+    // M2: Fastify's own client errors. 413 (body too large) keeps its status; every other 4xx
+    // (415 media type, malformed JSON, ...) is a request validation failure.
+    if (fe.statusCode === 413) {
+      return reply.status(413).send(envelope(req, deps.now, 'DS_VALIDATION_002', 'Request payload too large'));
+    }
+    const clientError = typeof fe.statusCode === 'number' && fe.statusCode >= 400 && fe.statusCode < 500;
+    if (err instanceof ZodError || fe.validation || clientError) {
+      const issues = err instanceof ZodError ? err.issues : (fe.validation ?? (fe.code ? [{ code: fe.code, message: fe.message }] : []));
       return reply
         .status(400)
         .send(envelope(req, deps.now, 'DS_VALIDATION_001', 'Request validation failed', { issues }));
     }
-    req.log.error(err);
+    // M3: every 500 is logged with the request line and headers (credentials redacted).
+    req.log.error({ err, request: { method: req.method, url: req.url, headers: req.headers } }, 'unhandled error');
     return reply.status(500).send(envelope(req, deps.now, 'DS_INTERNAL_001', 'Internal server error'));
   });
 

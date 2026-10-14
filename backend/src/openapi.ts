@@ -53,7 +53,8 @@ export const ERROR_CATALOG: readonly ErrorCatalogEntry[] = [
   { code: 'DS_UPLOAD_003', http_status: 409, meaning: 'The artefact was already declared with a different sha256.' },
   { code: 'DS_UPLOAD_004', http_status: 409, meaning: 'The artefact status does not accept upload parts.' },
   { code: 'DS_UPLOAD_005', http_status: 409, meaning: 'The upload is incomplete: the uploaded parts add up to fewer bytes than size_bytes (detail: received_bytes, size_bytes). Retryable: upload the missing parts and complete again (the same Idempotency-Key may be reused). The artefact status is unchanged.' },
-  { code: 'DS_VALIDATION_001', http_status: 400, meaning: 'Request validation failed (unknown field, wrong type, out of range). detail.issues lists the problems.' },
+  { code: 'DS_VALIDATION_001', http_status: 400, meaning: 'Request validation failed (unknown field, wrong type, out of range, wrong unit, unsupported media type, malformed JSON). detail.issues lists the problems.' },
+  { code: 'DS_VALIDATION_002', http_status: 413, meaning: 'Request payload too large (body over the server limit, 1 MiB).' },
 ];
 
 const ErrorCodeSchema = z.enum(ERROR_CATALOG.map((e) => e.code) as [string, ...string[]]);
@@ -82,6 +83,8 @@ const Consent = z.object({
   consent_version: z.string(),
   current_version: z.string(),
   withdrawn: z.boolean(),
+  capture_allowed: z.boolean().describe('Same rule as the capture gate: true only when block_code is null'),
+  block_code: z.enum(['DS_REG_001', 'DS_REG_002']).nullable().describe('451 code a capture would get now; null when capture is allowed'),
   checked_at: z.string().datetime(),
 });
 const ScanView = z.object({
@@ -271,6 +274,7 @@ const ERROR_STATUS_TEXT: Record<number, string> = {
   409: 'Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)',
   422: 'Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)',
   429: 'Rate limited (DS_RATE_001)',
+  413: 'Request payload too large (DS_VALIDATION_002)',
   451: 'Consent gate (DS_REG_001 / DS_REG_002)',
   500: 'Internal error (DS_INTERNAL_001)',
 };
@@ -361,6 +365,7 @@ function decorate(doc: Json): Json {
         errs.add(401);
         errs.add(403);
       }
+      if (method === 'post') errs.add(413);
       if (d.idempotent) {
         errs.add(400);
         errs.add(409);

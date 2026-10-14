@@ -82,7 +82,8 @@ interface ArtefactRow {
   status: string;
 }
 
-const actorRole = (a: Actor) => a.roles[0];
+/** Audit actor_role: the role that satisfied the route guard (M1). */
+const actorRole = (a: Actor) => a.role;
 
 type DeclareOutcome =
   | { kind: 'ok'; created: boolean; id: string; upload_id: string | null }

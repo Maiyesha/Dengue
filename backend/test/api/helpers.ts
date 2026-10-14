@@ -112,7 +112,7 @@ export async function buildTestApp(
     ...fakes,
     ...overrides,
   };
-  const app = buildApp(deps);
+  const app = buildApp(deps, { logLevel: 'silent' });
   register?.(app);
   await app.ready();
   return { app, deps, fakes };

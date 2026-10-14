@@ -37,6 +37,11 @@ export interface Actor {
   kind: 'user' | 'device';
   id: string;
   roles: AppRole[];
+  /**
+   * The acting role: the role that satisfied the route guard (M1), recorded as the audit
+   * actor_role. Until a guard has run it is roles[0].
+   */
+  role: AppRole;
   siteId?: string;
   deidentify: boolean;
 }
@@ -74,10 +79,12 @@ function userActorFrom(p: JWTPayload): Actor {
   if (!Array.isArray(roles) || roles.length === 0 || !roles.every(isUserRole)) throw unauthenticated();
   if (p.site_id !== undefined && (typeof p.site_id !== 'string' || p.site_id === '')) throw unauthenticated();
   if (p.deidentify !== undefined && typeof p.deidentify !== 'boolean') throw unauthenticated();
+  const unique = [...new Set(roles)];
   return {
     kind: 'user',
     id: p.sub,
-    roles: [...new Set(roles)],
+    roles: unique,
+    role: unique[0],
     ...(p.site_id !== undefined ? { siteId: p.site_id as string } : {}),
     // Absent claim => de-identified view (fail closed).
     deidentify: p.deidentify === undefined ? true : (p.deidentify as boolean),
@@ -125,7 +132,9 @@ async function authenticateDevice(req: FastifyRequest, token: string): Promise<A
       typeof claims.site_id !== 'string' || claims.site_id === '') {
     throw unauthenticated();
   }
-  const actor: Actor = { kind: 'device', id: claims.device_id, roles: ['device'], siteId: claims.site_id, deidentify: false };
+  const actor: Actor = {
+    kind: 'device', id: claims.device_id, roles: ['device'], role: 'device', siteId: claims.site_id, deidentify: false,
+  };
   // Revocation check on every request. RLS (devices_select_self) lets a device read only its
   // own row, and only when app.site_id matches the row's site.
   const row = await withRls(deps.pool, actor, async (c) =>
@@ -142,17 +151,23 @@ async function authenticate(req: FastifyRequest): Promise<Actor> {
     : authenticateUser(req, token);
 }
 
-function guard(allow: (a: Actor) => boolean): preHandlerAsyncHookHandler {
+/** A guard's matcher returns the role that satisfies the route, or null (403). */
+type RoleMatch = (a: Actor) => AppRole | null;
+
+function guard(match: RoleMatch): preHandlerAsyncHookHandler {
   return async function (req) {
     req.actor = null;
     const actor = await authenticate(req);
-    if (!allow(actor)) throw forbidden();
-    req.actor = actor;
+    const role = match(actor);
+    if (!role) throw forbidden();
+    req.actor = { ...actor, role };
   };
 }
 
-const userWith = (roles: UserRole[]) => (a: Actor) =>
-  a.kind === 'user' && a.roles.some((r) => (roles as AppRole[]).includes(r));
+/** First of the token's roles (in token order) that the route allows. */
+const userWith = (roles: UserRole[]): RoleMatch => (a) =>
+  a.kind === 'user' ? (a.roles.find((r) => (roles as AppRole[]).includes(r)) ?? null) : null;
+const device: RoleMatch = (a) => (a.kind === 'device' ? 'device' : null);
 
 /** User token with at least one of `roles`. Device tokens get 403. */
 export function requireUser(...roles: UserRole[]): preHandlerAsyncHookHandler {
@@ -162,11 +177,11 @@ export function requireUser(...roles: UserRole[]): preHandlerAsyncHookHandler {
 
 /** Device token only (aud "device-upload"). User tokens get 403. */
 export function requireDevice(): preHandlerAsyncHookHandler {
-  return guard((a) => a.kind === 'device');
+  return guard(device);
 }
 
 /** Either a device token or a user token with one of `roles` (artefact routes, GET /scans/:id). */
 export function requireUserOrDevice(...roles: UserRole[]): preHandlerAsyncHookHandler {
   const user = userWith(roles);
-  return guard((a) => a.kind === 'device' || user(a));
+  return guard((a) => device(a) ?? user(a));
 }

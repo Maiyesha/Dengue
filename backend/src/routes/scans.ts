@@ -132,7 +132,8 @@ async function scanView(c: pg.PoolClient, id: string, status: string, metadata: 
   return { id, status, steps, recaptures_remaining };
 }
 
-const actorRole = (a: Actor) => a.roles[0];
+/** Audit actor_role: the role that satisfied the route guard (M1). */
+const actorRole = (a: Actor) => a.role;
 
 type CreateOutcome =
   | { kind: 'created' | 'existing'; scan: ScanRow }

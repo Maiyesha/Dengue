@@ -197,7 +197,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         await audit(c, {
           eventType: 'clinician_action',
           actorId: actor.id,
-          actorRole: actor.roles[0],
+          actorRole: actor.role,
           patientPseudonym: pseudonym,
           resourceType: 'scan',
           resourceId: s.id,
@@ -231,7 +231,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
               audit(c, {
                 eventType: 'device_event',
                 actorId: actor.id,
-                actorRole: actor.roles[0],
+                actorRole: actor.role,
                 patientPseudonym: out.pseudonym,
                 resourceType: 'scan',
                 resourceId: out.scan_id,
@@ -277,7 +277,7 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         await audit(c, {
           eventType: 'view_experimental',
           actorId: actor.id,
-          actorRole: actor.roles[0],
+          actorRole: actor.role,
           patientPseudonym: pseudonym,
           resourceType: 'scan',
           resourceId: s.id,

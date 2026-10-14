@@ -117,7 +117,7 @@ describe('requireUser', () => {
     const r = await get('/t/nurse', bearer(t));
     expect(r.statusCode).toBe(200);
     expect(r.json()).toEqual({
-      kind: 'user', id: 'rls-nurse_operator', roles: ['nurse_operator'], siteId: SITE_A, deidentify: false,
+      kind: 'user', id: 'rls-nurse_operator', roles: ['nurse_operator'], role: 'nurse_operator', siteId: SITE_A, deidentify: false,
     });
   });
 
@@ -134,7 +134,7 @@ describe('requireDevice', () => {
     const t = await deviceTokenFor(DEVICE_ID, SITE_A);
     const r = await get('/t/device', bearer(t));
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toEqual({ kind: 'device', id: DEVICE_ID, roles: ['device'], siteId: SITE_A, deidentify: false });
+    expect(r.json()).toEqual({ kind: 'device', id: DEVICE_ID, roles: ['device'], role: 'device', siteId: SITE_A, deidentify: false });
   });
 
   it('user token on device route → 403; garbage → 401; none → 401', async () => {
@@ -191,12 +191,12 @@ describe('withRls', () => {
       const actor = { kind: 'user', id: 'u', roles, siteId: SITE_A, deidentify: false } as unknown as Actor;
       await expect(withRls(pool, actor, async () => 'ran')).rejects.toThrow(/withRls/);
     }
-    const ok: Actor = { kind: 'user', id: 'u', roles: ['system_agent'], siteId: SITE_A, deidentify: true };
+    const ok: Actor = { kind: 'user', id: 'u', roles: ['system_agent'], role: 'system_agent', siteId: SITE_A, deidentify: true };
     expect(await withRls(pool, ok, async () => 'ran')).toBe('ran');
   });
 
   it('withRls sets app.site_id visible to current_setting', async () => {
-    const actor: Actor = { kind: 'user', id: 'rls-nurse_operator', roles: ['nurse_operator'], siteId: SITE_A, deidentify: true };
+    const actor: Actor = { kind: 'user', id: 'rls-nurse_operator', roles: ['nurse_operator'], role: 'nurse_operator', siteId: SITE_A, deidentify: true };
     const row = await withRls(pool, actor, async (c) =>
       (await c.query(`SELECT current_setting('app.site_id') AS site, current_setting('app.user_id') AS uid,
                              current_setting('app.roles') AS roles, current_setting('app.deidentify') AS deid,
@@ -205,7 +205,7 @@ describe('withRls', () => {
   });
 
   it('device actor runs with app.roles = device and sees only its own site', async () => {
-    const actor: Actor = { kind: 'device', id: DEVICE_ID, roles: ['device'], siteId: SITE_A, deidentify: false };
+    const actor: Actor = { kind: 'device', id: DEVICE_ID, roles: ['device'], role: 'device', siteId: SITE_A, deidentify: false };
     const r = await withRls(pool, actor, async (c) => ({
       roles: (await c.query(`SELECT current_setting('app.roles') AS r`)).rows[0].r,
       sites: (await c.query('SELECT DISTINCT site_id FROM scans')).rows.map((x) => x.site_id),
@@ -215,7 +215,7 @@ describe('withRls', () => {
   });
 
   it('settings and role do not leak to the next use of the pooled connection', async () => {
-    const actor: Actor = { kind: 'user', id: 'u', roles: ['clinician'], siteId: SITE_B, deidentify: false };
+    const actor: Actor = { kind: 'user', id: 'u', roles: ['clinician'], role: 'clinician', siteId: SITE_B, deidentify: false };
     await withRls(pool, actor, async () => undefined);
     const clients = await Promise.all(Array.from({ length: 5 }, () => pool.connect()));
     try {
@@ -230,14 +230,14 @@ describe('withRls', () => {
   });
 
   it('a site-less actor sees zero scans (fails closed)', async () => {
-    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], deidentify: false };
+    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], role: 'nurse_operator', deidentify: false };
     const n = await withRls(pool, actor, async (c) => (await c.query('SELECT count(*)::int AS n FROM scans')).rows[0].n);
     expect(n).toBe(0);
   });
 
   it('rolls back when fn throws', async () => {
     const csid = randomUUID();
-    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], siteId: SITE_A, deidentify: false };
+    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], role: 'nurse_operator', siteId: SITE_A, deidentify: false };
     await expect(withRls(pool, actor, async (c) => {
       await c.query(`INSERT INTO scans(client_session_id, patient_id, site_id, captured_at, protocol_version)
                      VALUES ($1,$2,$3,now(),'p1')`, [csid, PATIENT_A, SITE_A]);
@@ -248,7 +248,7 @@ describe('withRls', () => {
 
   it('refuses to report success when fn swallowed a DB error (aborted tx)', async () => {
     const csid = randomUUID();
-    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], siteId: SITE_A, deidentify: false };
+    const actor: Actor = { kind: 'user', id: 'u', roles: ['nurse_operator'], role: 'nurse_operator', siteId: SITE_A, deidentify: false };
     await expect(withRls(pool, actor, async (c) => {
       await c.query(`INSERT INTO scans(client_session_id, patient_id, site_id, captured_at, protocol_version)
                      VALUES ($1,$2,$3,now(),'p1')`, [csid, PATIENT_A, SITE_A]);

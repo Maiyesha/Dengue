@@ -96,6 +96,7 @@ const systemActor = (id: string, siteId?: string): Actor => ({
   kind: 'user',
   id,
   roles: ['system_agent'],
+  role: 'system_agent',
   siteId,
   deidentify: true,
 });
@@ -238,7 +239,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
         await audit(c, {
           eventType: 'device_event',
           actorId: caller.id,
-          actorRole: caller.roles[0],
+          actorRole: caller.role,
           patientPseudonym: NO_PATIENT,
           resourceType: 'device',
           resourceId: id,
@@ -331,7 +332,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       if (req.actor) {
         const caller = actorOf(req);
         siteId = siteOf(caller);
-        who = { id: caller.id, role: caller.roles[0] };
+        who = { id: caller.id, role: caller.role };
         challenge = await consumeChallenge(siteId, b.challenge, { purpose: 'attest', issuedTo: caller.id });
       } else {
         // Unknown device: indistinguishable from an unusable challenge.

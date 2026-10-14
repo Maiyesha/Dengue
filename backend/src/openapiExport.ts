@@ -4,7 +4,7 @@ import { buildApp } from './app';
 import type { AppDeps } from './deps';
 
 export async function generateOpenApi(): Promise<Record<string, unknown>> {
-  const app = buildApp({ now: () => new Date(0) } as unknown as AppDeps);
+  const app = buildApp({ now: () => new Date(0) } as unknown as AppDeps, { logLevel: 'silent' });
   try {
     await app.ready();
     return JSON.parse(JSON.stringify(app.swagger())) as Record<string, unknown>;
