@@ -6,6 +6,7 @@ import { ApiError } from './errors';
 import type { AppDeps } from './deps';
 import { idempotencyPlugin } from './idempotency';
 import { artefactRoutes } from './routes/artefacts';
+import { clinicalDataRoutes } from './routes/clinicalData';
 import { patientRoutes } from './routes/patients';
 import { scanRoutes } from './routes/scans';
 import './auth'; // FastifyRequest.actor type augmentation
@@ -72,6 +73,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(patientRoutes);
   app.register(scanRoutes);
   app.register(artefactRoutes);
+  app.register(clinicalDataRoutes);
 
   return app;
 }
