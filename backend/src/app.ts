@@ -4,6 +4,8 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import { ZodError } from 'zod';
 import { ApiError } from './errors';
 import type { AppDeps } from './deps';
+import { idempotencyPlugin } from './idempotency';
+import { patientRoutes } from './routes/patients';
 import './auth'; // FastifyRequest.actor type augmentation
 
 const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i;
@@ -43,7 +45,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   app.setNotFoundHandler((req, reply) =>
-    reply.status(404).send(envelope(req, deps.now, 'DS_NOT_FOUND_001', 'Route not found')),
+    reply.status(404).send(envelope(req, deps.now, 'DS_NOT_FOUND', 'Route not found')),
   );
 
   app.setErrorHandler((err: FastifyError | ApiError | ZodError, req: FastifyRequest, reply: FastifyReply) => {
@@ -62,6 +64,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   app.get('/health', async () => ({ status: 'alive' }));
+
+  // Not encapsulated: its hooks must see every route registered after it.
+  app.register(idempotencyPlugin);
+  app.register(patientRoutes);
 
   return app;
 }

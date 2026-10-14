@@ -37,7 +37,7 @@ describe('app skeleton', () => {
     const res = await a.inject({ method: 'GET', url: '/v1/nope' });
     expect(res.statusCode).toBe(404);
     const e = res.json().error;
-    expect(e.code).toBe('DS_NOT_FOUND_001');
+    expect(e.code).toBe('DS_NOT_FOUND');
     expect(e.request_id).toBe(res.headers['x-request-id']);
     expect(e).toHaveProperty('trace_id');
     expect(e).toHaveProperty('detail');

@@ -37,10 +37,6 @@ async function scanThenAudit(actor: Actor, clientSessionId: string, eventType: s
 beforeAll(async () => {
   await seedFixtures(pool);
   ({ app } = await buildTestApp((a) => {
-    // Stand-in for the Task 4 route; the guard is what is under test.
-    if (!a.hasRoute({ method: 'GET', url: '/v1/patients/lookup' })) {
-      a.get('/v1/patients/lookup', { preHandler: requireUser('nurse_operator', 'clinician') }, async () => ({ ok: true }));
-    }
     a.get('/t/nurse', { preHandler: requireUser('nurse_operator') }, async (req) => actorOf(req));
     a.get('/t/device', { preHandler: requireDevice() }, async (req) => actorOf(req));
     a.get('/t/either', { preHandler: requireUserOrDevice('nurse_operator') }, async (req) => actorOf(req));
