@@ -1,8 +1,14 @@
 // Artefact multipart uploads and the quality trigger. Callable by site users or a device token.
 //
 // Object key: captures/{site_id}/{scan_id}/{step}/{attempt}/{kind} (no participant code).
-// Quality trigger: when, for every core step of the scan, the LATEST attempt has a video AND a
-// roi_trace artefact in received_verified, the scan moves capture_pending -> quality_pending.
+// Quality trigger (F9b): a core step is settled when its latest attempt is UNABLE_TO_ACQUIRE or it
+// is in metadata.unable_to_acquire. When every non-settled core step's LATEST attempt has a video
+// AND a roi_trace artefact in received_verified, and at least one core step is verified, the scan
+// moves capture_pending -> quality_pending.
+// Declare creates a missing step attempt (F9a: pre-registered scans; step must be in
+// metadata.capture_steps, scan capture_pending; optional device_verdict, default ACCEPT).
+// acquisition_failure scans (F9c) still accept declare/complete for EXISTING attempts; they never
+// trigger or enqueue.
 // The scan row is locked FOR UPDATE for declare/complete, so concurrent final completes
 // serialise and exactly one UPDATE ... WHERE status='capture_pending' affects a row. Enqueue is
 // at-least-once (F6): every complete that finds the scan quality_pending with its core artefacts
@@ -41,8 +47,25 @@ const DeclareBody = z
     kind: z.enum(['video', 'roi_trace', 'metadata']),
     size_bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     sha256: z.string().regex(/^[0-9a-fA-F]{64}$/),
+    device_verdict: z
+      .enum(['ACCEPT', 'RECAPTURE', 'UNABLE_TO_ACQUIRE'])
+      .default('ACCEPT')
+      .describe('Used only when this declare creates the step attempt (pre-registered scans); ignored otherwise'),
   })
   .strict();
+
+interface ScanMetadata {
+  capture_steps?: string[];
+  unable_to_acquire?: string[];
+}
+
+/** Artefacts are accepted while capturing, and for existing attempts after acquisition_failure (F9c). */
+const ACCEPTS_ARTEFACTS = new Set(['capture_pending', 'acquisition_failure']);
+function assertAcceptsArtefacts(status: string): void {
+  if (!ACCEPTS_ARTEFACTS.has(status)) {
+    throw new ApiError(409, 'DS_STATE_001', `Scan in status ${status} does not accept artefacts`);
+  }
+}
 
 const ScanParams = z.object({ id: z.string().uuid() });
 const ArtefactParams = z.object({ id: z.string().uuid() });
@@ -74,19 +97,30 @@ async function pseudonymOf(c: pg.PoolClient, scanId: string): Promise<string> {
   return r.rows[0]?.pseudonym_id ?? 'n/a';
 }
 
-/** True when every core step's latest attempt has verified video + roi_trace. */
-async function coreArtefactsVerified(c: pg.PoolClient, scanId: string): Promise<boolean> {
-  const core = CORE_STEPS;
-  const r = await c.query<{ step: string; ok: boolean }>(
-    `SELECT l.step::text AS step,
-            (SELECT count(DISTINCT a.kind) FROM artefacts a
-              WHERE a.scan_id = l.scan_id AND a.step = l.step AND a.attempt = l.attempt
-                AND a.kind IN ('video','roi_trace') AND a.status = 'received_verified') = 2 AS ok
-       FROM (SELECT scan_id, step, max(attempt) AS attempt FROM scan_step_attempts
-              WHERE scan_id = $1 AND step = ANY($2::capture_step[]) GROUP BY scan_id, step) l`,
-    [scanId, core],
+/**
+ * Quality trigger (F9b). A core step is SETTLED when its latest attempt's device_verdict is
+ * UNABLE_TO_ACQUIRE or it is listed in metadata.unable_to_acquire. Ready when every non-settled
+ * core step's latest attempt has verified video + roi_trace, and at least one core step is
+ * verified. A core step with no attempt at all (and not settled) blocks the trigger.
+ */
+async function coreArtefactsVerified(c: pg.PoolClient, scanId: string, meta: ScanMetadata): Promise<boolean> {
+  const r = await c.query<{ step: string; device_verdict: string | null; verified: boolean }>(
+    `SELECT core.step::text AS step, l.device_verdict,
+            (l.attempt IS NOT NULL AND
+             (SELECT count(DISTINCT a.kind) FROM artefacts a
+               WHERE a.scan_id = $1 AND a.step = core.step AND a.attempt = l.attempt
+                 AND a.kind IN ('video','roi_trace') AND a.status = 'received_verified') = 2) AS verified
+       FROM unnest($2::capture_step[]) AS core(step)
+       LEFT JOIN LATERAL (
+         SELECT t.attempt, t.device_verdict FROM scan_step_attempts t
+          WHERE t.scan_id = $1 AND t.step = core.step ORDER BY t.attempt DESC LIMIT 1
+       ) l ON true`,
+    [scanId, CORE_STEPS],
   );
-  return r.rows.length === core.length && r.rows.every((x) => x.ok);
+  const unable = meta.unable_to_acquire ?? [];
+  const settled = (x: { step: string; device_verdict: string | null }) =>
+    x.device_verdict === 'UNABLE_TO_ACQUIRE' || unable.includes(x.step);
+  return r.rows.every((x) => settled(x) || x.verified) && r.rows.some((x) => x.verified);
 }
 
 export async function artefactRoutes(app: FastifyInstance): Promise<void> {
@@ -103,8 +137,8 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
       const sha = b.sha256.toLowerCase();
       const out = await withRls(app.deps.pool, actor, async (c): Promise<DeclareOutcome> => {
         const s = (
-          await c.query<{ id: string; site_id: string; status: string }>(
-            'SELECT id, site_id, status::text AS status FROM scans WHERE id = $1 FOR UPDATE',
+          await c.query<{ id: string; site_id: string; status: string; metadata: ScanMetadata }>(
+            'SELECT id, site_id, status::text AS status, metadata FROM scans WHERE id = $1 FOR UPDATE',
             [req.params.id],
           )
         ).rows[0];
@@ -137,9 +171,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
             return { kind: 'ok', created: false, id: existing.id, upload_id: existing.upload_id };
           }
           // F5: a rejected artefact (sha mismatch) is re-uploaded under a NEW multipart upload.
-          if (s.status !== 'capture_pending') {
-            throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} does not accept artefacts`);
-          }
+          assertAcceptsArtefacts(s.status);
           const uploadId = await app.deps.objectStore.createMultipart(existing.object_key);
           await c.query(
             `UPDATE artefacts SET upload_id = $2, size_bytes = $3, status = 'declared' WHERE id = $1 AND status = 'rejected'`,
@@ -162,11 +194,21 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           [s.id, b.step, b.attempt],
         );
         if (!att.rowCount) {
-          throw new ApiError(422, 'DS_UPLOAD_002', 'No such step attempt for this scan');
+          // F9(a): create the missing attempt (POST /v1/scans pre-registration sends none), but
+          // only for a step of this capture and only while the capture is open.
+          if (!(s.metadata.capture_steps ?? []).includes(b.step)) {
+            throw new ApiError(422, 'DS_UPLOAD_002', 'No such step for this scan');
+          }
+          if (s.status !== 'capture_pending') {
+            throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} does not accept new step attempts`);
+          }
+          await c.query(
+            `INSERT INTO scan_step_attempts (scan_id, step, attempt, device_verdict, reason_codes)
+             VALUES ($1, $2::capture_step, $3, $4, '{}') ON CONFLICT DO NOTHING`,
+            [s.id, b.step, b.attempt, b.device_verdict],
+          );
         }
-        if (s.status !== 'capture_pending') {
-          throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} does not accept artefacts`);
-        }
+        assertAcceptsArtefacts(s.status);
 
         const key = `captures/${s.site_id}/${s.id}/${b.step}/${b.attempt}/${b.kind}`;
         const uploadId = await app.deps.objectStore.createMultipart(key);
@@ -233,8 +275,8 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         if (!ref) throw notFound();
         // Lock the scan first (same order as declare) so final completes serialise.
         const s = (
-          await c.query<{ id: string; site_id: string }>(
-            'SELECT id, site_id FROM scans WHERE id = $1 FOR UPDATE',
+          await c.query<{ id: string; site_id: string; metadata: ScanMetadata }>(
+            'SELECT id, site_id, metadata FROM scans WHERE id = $1 FOR UPDATE',
             [ref.scan_id],
           )
         ).rows[0];
@@ -283,7 +325,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         // artefacts are verified, enqueue after commit -- also on a retry, so an enqueue that failed
         // after an earlier commit is redelivered. The quality worker must dedupe by scan_id.
         let enqueue = false;
-        if (await coreArtefactsVerified(c, s.id)) {
+        if (await coreArtefactsVerified(c, s.id, s.metadata)) {
           await c.query(
             `UPDATE scans SET status = 'quality_pending' WHERE id = $1 AND status = 'capture_pending'`,
             [s.id],

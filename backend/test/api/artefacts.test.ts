@@ -14,21 +14,21 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
 async function mkScan(
   status = 'capture_pending',
-  attempts: Array<[string, number]> = [['neutral_face', 1], ['fingertip_ppg', 1]],
+  attempts: Array<[string, number] | [string, number, string]> = [['neutral_face', 1], ['fingertip_ppg', 1]],
   patient = PATIENT_A,
+  metadata: Record<string, unknown> = {},
 ) {
   const id = randomUUID();
   scanIds.push(id);
   await pool.query(
     `INSERT INTO scans(id,client_session_id,patient_id,site_id,captured_at,protocol_version,status,metadata)
-     VALUES ($1,gen_random_uuid(),$2,$3,now() - interval '40 days','p1',$4::scan_status,
-             '{"capture_steps":["neutral_face","fingertip_ppg"]}'::jsonb)`,
-    [id, patient, SITE_A, status],
+     VALUES ($1,gen_random_uuid(),$2,$3,now() - interval '40 days','p1',$4::scan_status,$5::jsonb)`,
+    [id, patient, SITE_A, status, JSON.stringify({ capture_steps: ['neutral_face', 'fingertip_ppg', 'ocular_capture'], ...metadata })],
   );
-  for (const [step, attempt] of attempts) {
+  for (const [step, attempt, verdict] of attempts) {
     await pool.query(
-      `INSERT INTO scan_step_attempts(scan_id,step,attempt,device_verdict) VALUES ($1,$2,$3,'ACCEPT')`,
-      [id, step, attempt],
+      `INSERT INTO scan_step_attempts(scan_id,step,attempt,device_verdict) VALUES ($1,$2,$3,$4)`,
+      [id, step, attempt, verdict ?? 'ACCEPT'],
     );
   }
   return id;
@@ -124,9 +124,9 @@ describe('artefact uploads', () => {
     expect(c.json().error.code).toBe('DS_UPLOAD_003');
   });
 
-  it('declare for a non-existent step attempt -> 422 DS_UPLOAD_002', async () => {
+  it('declare for a step that is not part of the capture -> 422 DS_UPLOAD_002', async () => {
     const scan = await mkScan();
-    const r = await declare(scan, 'neutral_face', 'video', 'a', 2);
+    const r = await declare(scan, 'dorsal_tongue', 'video', 'a');
     expect(r.statusCode).toBe(422);
     expect(r.json().error.code).toBe('DS_UPLOAD_002');
   });
@@ -425,6 +425,119 @@ describe('device_id and consent re-check (F1, F2)', () => {
     expect(await postHoc(scan)).toEqual([
       { event_type: 'capture_rejected_post_hoc', actor_role: 'nurse_operator', patient_pseudonym: 'ps-art-gate', resource_type: 'scan', outcome: 'DS_REG_002' },
     ]);
+  });
+});
+
+describe('scan lifecycle (F9)', () => {
+  const attempts = async (scan: string) =>
+    (await pool.query(
+      `SELECT step::text, attempt, device_verdict FROM scan_step_attempts WHERE scan_id = $1 ORDER BY step, attempt`,
+      [scan],
+    )).rows;
+  const enqueued = (scan: string) => ta.fakes.qualityQueue.enqueued.filter((x) => x === scan).length;
+
+  it('(a) POST /v1/scans pre-registration (no attempts): device declare creates the attempt, upload completes', async () => {
+    const created = await post('/v1/scans', {
+      client_session_id: randomUUID(),
+      patient_id: PATIENT_A,
+      captured_at: '2025-01-01T08:00:00Z',
+      offline: false,
+      protocol_version: 'p1',
+      capture_steps: ['neutral_face', 'fingertip_ppg'],
+      device_attempts: [],
+      metadata: {
+        camera_model: 'iPhone15,3', frame_rate: 60, resolution: '1920x1080', exposure: 0.5, distance_cm: 40,
+        angle_deg: 0, lighting_lux: 500, ambient_temp_c: 27, ambient_humidity_pct: 70, mount: 'holder',
+        lighting_type: 'led_ring', exposure_duration_ms: 8,
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const scan = created.json().scan.id as string;
+    scanIds.push(scan);
+    const dev = await deviceTokenFor(randomUUID(), SITE_A);
+    for (const step of ['neutral_face', 'fingertip_ppg']) {
+      for (const kind of ['video', 'roi_trace']) {
+        const d = await declare(scan, step, kind, `${step}-${kind}`, 1, dev);
+        expect(d.statusCode, `${step} ${kind}`).toBe(201);
+        ta.fakes.objectStore.put(keyOf(scan, step, kind), sha(`${step}-${kind}`));
+        expect((await post(`/v1/artefacts/${d.json().artefact_id}/complete`, {}, { token: dev })).statusCode).toBe(200);
+      }
+    }
+    expect(await attempts(scan)).toEqual([
+      { step: 'fingertip_ppg', attempt: 1, device_verdict: 'ACCEPT' },
+      { step: 'neutral_face', attempt: 1, device_verdict: 'ACCEPT' },
+    ]);
+    expect(await statusOf(scan)).toBe('quality_pending');
+    expect(enqueued(scan)).toBe(1);
+  });
+
+  it('(a) declare takes an optional device_verdict for a new attempt; attempt must be 1..3', async () => {
+    const scan = await mkScan('capture_pending', []);
+    const body = (o: Record<string, unknown>) => ({ step: 'fingertip_ppg', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('u'), ...o });
+    const r = await post(`/v1/scans/${scan}/artefacts`, body({ device_verdict: 'UNABLE_TO_ACQUIRE' }));
+    expect(r.statusCode).toBe(201);
+    expect(await attempts(scan)).toEqual([{ step: 'fingertip_ppg', attempt: 1, device_verdict: 'UNABLE_TO_ACQUIRE' }]);
+    // An existing attempt keeps its verdict.
+    const again = await post(`/v1/scans/${scan}/artefacts`, body({ kind: 'roi_trace', device_verdict: 'RECAPTURE' }));
+    expect(again.statusCode).toBe(201);
+    expect((await attempts(scan))[0].device_verdict).toBe('UNABLE_TO_ACQUIRE');
+    for (const bad of [body({ attempt: 0 }), body({ attempt: 4 }), body({ device_verdict: 'MAYBE' })]) {
+      expect((await post(`/v1/scans/${scan}/artefacts`, bad)).statusCode).toBe(400);
+    }
+  });
+
+  it('(b) a core step whose latest attempt is UNABLE_TO_ACQUIRE is settled: the other core step triggers quality', async () => {
+    const scan = await mkScan('capture_pending', [['neutral_face', 1], ['fingertip_ppg', 1, 'UNABLE_TO_ACQUIRE']]);
+    await upload(scan, 'neutral_face', 'video');
+    expect(await statusOf(scan)).toBe('capture_pending');
+    await upload(scan, 'neutral_face', 'roi_trace');
+    expect(await statusOf(scan)).toBe('quality_pending');
+    expect(enqueued(scan)).toBe(1);
+  });
+
+  it('(b) a core step listed in metadata.unable_to_acquire is settled', async () => {
+    const scan = await mkScan('capture_pending', [['neutral_face', 1], ['fingertip_ppg', 1]], PATIENT_A, {
+      unable_to_acquire: ['neutral_face'],
+    });
+    await upload(scan, 'fingertip_ppg', 'video');
+    await upload(scan, 'fingertip_ppg', 'roi_trace');
+    expect(await statusOf(scan)).toBe('quality_pending');
+  });
+
+  it('(b) no verified core step -> no trigger even when every core step is settled', async () => {
+    const scan = await mkScan('capture_pending', [
+      ['neutral_face', 1, 'UNABLE_TO_ACQUIRE'], ['fingertip_ppg', 1, 'UNABLE_TO_ACQUIRE'], ['ocular_capture', 1],
+    ]);
+    await upload(scan, 'ocular_capture', 'video');
+    await upload(scan, 'ocular_capture', 'roi_trace');
+    expect(await statusOf(scan)).toBe('capture_pending');
+    expect(enqueued(scan)).toBe(0);
+  });
+
+  it('(b) a settled step that was later recaptured (latest attempt ACCEPT) is not settled', async () => {
+    const scan = await mkScan('capture_pending', [
+      ['neutral_face', 1], ['fingertip_ppg', 1, 'UNABLE_TO_ACQUIRE'], ['fingertip_ppg', 2],
+    ]);
+    await upload(scan, 'neutral_face', 'video');
+    await upload(scan, 'neutral_face', 'roi_trace');
+    expect(await statusOf(scan)).toBe('capture_pending');
+    await upload(scan, 'fingertip_ppg', 'video', 2);
+    await upload(scan, 'fingertip_ppg', 'roi_trace', 2);
+    expect(await statusOf(scan)).toBe('quality_pending');
+  });
+
+  it('(c) acquisition_failure: declare and complete for existing attempts, no enqueue; new attempts refused', async () => {
+    const scan = await mkScan('acquisition_failure');
+    const r = await upload(scan, 'neutral_face', 'video');
+    expect(r.statusCode).toBe(200);
+    await upload(scan, 'neutral_face', 'roi_trace');
+    await upload(scan, 'fingertip_ppg', 'video');
+    await upload(scan, 'fingertip_ppg', 'roi_trace');
+    expect(await statusOf(scan)).toBe('acquisition_failure');
+    expect(enqueued(scan)).toBe(0);
+    const fresh = await declare(scan, 'neutral_face', 'video', 'n', 2);
+    expect(fresh.statusCode).toBe(409);
+    expect(fresh.json().error.code).toBe('DS_STATE_001');
   });
 });
 

@@ -1,4 +1,5 @@
-// Migration 0010: the `device` role may SELECT scan_step_attempts of its own site's scans (read-only).
+// Migration 0010: the `device` role may SELECT scan_step_attempts of its own site's scans;
+// migration 0015 adds INSERT for its own site (artefact declare creates missing attempts).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
 import { getTestPool, asRole } from './pg';
@@ -42,11 +43,29 @@ describe('device role: scan_step_attempts', () => {
     });
   });
 
-  it('cannot insert attempts, even for its own site', async () => {
+  // Migration 0015 (F9a) superseded 0010's "read-only": artefact declare creates missing attempts,
+  // so a device may INSERT attempts for its own site's scans -- and only those.
+  it('may insert attempts for its own site only (0015); never without a site', async () => {
+    await asDevice(async (c) => {
+      const r = await c.query(
+        `INSERT INTO scan_step_attempts(scan_id, step, attempt, device_verdict) VALUES ($1,'neutral_face',2,'ACCEPT')`, [SCAN_A]);
+      expect(r.rowCount).toBe(1);
+      await expect(
+        c.query(`INSERT INTO scan_step_attempts(scan_id, step, attempt, device_verdict) VALUES ($1,'neutral_face',2,'ACCEPT')`, [SCAN_B]),
+      ).rejects.toThrow(/row-level security/);
+    }, SITE_A);
     await asDevice(async (c) => {
       await expect(
-        c.query(`INSERT INTO scan_step_attempts(scan_id, step, attempt, device_verdict) VALUES ($1,'neutral_face',2,'ACCEPT')`, [SCAN_A]),
+        c.query(`INSERT INTO scan_step_attempts(scan_id, step, attempt, device_verdict) VALUES ($1,'neutral_face',3,'ACCEPT')`, [SCAN_A]),
       ).rejects.toThrow(/row-level security/);
+    });
+  });
+
+  it('cannot update attempts', async () => {
+    await asDevice(async (c) => {
+      await expect(
+        c.query(`UPDATE scan_step_attempts SET device_verdict = 'RECAPTURE' WHERE scan_id = $1`, [SCAN_A]),
+      ).rejects.toThrow(/permission denied/);
     }, SITE_A);
   });
 });

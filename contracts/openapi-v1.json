@@ -2172,6 +2172,16 @@
                     "minimum": 1,
                     "type": "integer"
                   },
+                  "device_verdict": {
+                    "default": "ACCEPT",
+                    "description": "Used only when this declare creates the step attempt (pre-registered scans); ignored otherwise",
+                    "enum": [
+                      "ACCEPT",
+                      "RECAPTURE",
+                      "UNABLE_TO_ACQUIRE"
+                    ],
+                    "type": "string"
+                  },
                   "kind": {
                     "enum": [
                       "video",
