@@ -49,7 +49,7 @@ export const ERROR_CATALOG: readonly ErrorCatalogEntry[] = [
   { code: 'DS_STATE_002', http_status: 500, meaning: 'Database-level guard: an immutable scan column was changed. A server defect if it ever surfaces; reported as DS_INTERNAL_001.' },
   { code: 'DS_STATE_003', http_status: 500, meaning: 'Database-level guard: the acting role lacks authority for the scan transition. Reported as DS_INTERNAL_001 if it ever surfaces.' },
   { code: 'DS_UPLOAD_001', http_status: 422, meaning: 'The uploaded object sha256 does not match the declared value; the artefact is marked rejected.' },
-  { code: 'DS_UPLOAD_002', http_status: 422, meaning: 'No such step attempt exists for this scan.' },
+  { code: 'DS_UPLOAD_002', http_status: 422, meaning: 'The step is not part of this scan (not in its capture_steps). A missing attempt of a captured step is created by the declare itself.' },
   { code: 'DS_UPLOAD_003', http_status: 409, meaning: 'The artefact was already declared with a different sha256.' },
   { code: 'DS_UPLOAD_004', http_status: 409, meaning: 'The artefact status does not accept upload parts.' },
   { code: 'DS_UPLOAD_005', http_status: 409, meaning: 'The upload is incomplete: the uploaded parts add up to fewer bytes than size_bytes (detail: received_bytes, size_bytes). Retryable: upload the missing parts and complete again (the same Idempotency-Key may be reused). The artefact status is unchanged.' },

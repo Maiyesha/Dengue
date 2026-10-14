@@ -3764,7 +3764,7 @@
     {
       "code": "DS_UPLOAD_002",
       "http_status": 422,
-      "meaning": "No such step attempt exists for this scan."
+      "meaning": "The step is not part of this scan (not in its capture_steps). A missing attempt of a captured step is created by the declare itself."
     },
     {
       "code": "DS_UPLOAD_003",
