@@ -123,6 +123,30 @@ describe('POST /v1/scans/:id/review', () => {
     expect(fakes.push.sent).toEqual([{ deviceId: DEVICE, payload: { type: 'repeat_requested', scan_id: SCAN_A } }]);
   });
 
+  it('push failure still returns 201 with push failed and writes a device_event audit row', async () => {
+    await pool.query('UPDATE scans SET device_id=$2 WHERE id=$1', [SCAN_A, DEVICE]);
+    fakes.push.send = async () => {
+      throw new Error('push down');
+    };
+    const r = await review(SCAN_A, { action: 'request_repeat' });
+    expect(r.statusCode).toBe(201);
+    expect(r.json().push).toBe('failed');
+    expect(await status(SCAN_A)).toBe('flagged');
+    const a = await pool.query(
+      `SELECT event_type, patient_pseudonym FROM clinical_audit_log WHERE resource_id=$1 AND outcome='push:repeat_requested_failed'`,
+      [SCAN_A],
+    );
+    expect(a.rows[0]).toEqual({ event_type: 'device_event', patient_pseudonym: 'ps-rls-a' });
+  });
+
+  it('push field is sent, or skipped for no device and other actions', async () => {
+    await pool.query('UPDATE scans SET device_id=$2 WHERE id=$1', [SCAN_A, DEVICE]);
+    expect((await review(SCAN_A, { action: 'request_repeat' })).json().push).toBe('sent');
+    expect((await review(SCAN_NODEV, { action: 'request_repeat' })).json().push).toBe('skipped');
+    await setStatus(SCAN_A, 'review_pending');
+    expect((await review(SCAN_A, { action: 'confirm' })).json().push).toBe('skipped');
+  });
+
   it('request_repeat with no device skips push and notes it in the audit', async () => {
     const r = await review(SCAN_NODEV, { action: 'request_repeat' });
     expect(r.statusCode).toBe(201);

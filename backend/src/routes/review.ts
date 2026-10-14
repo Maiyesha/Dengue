@@ -124,18 +124,42 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
           review_id: rev.rows[0].id,
           scan_id: s.id,
           status: target,
+          pseudonym,
           pushDevice: b.action === 'request_repeat' ? s.device_id : null,
         };
       });
 
+      let push: 'sent' | 'failed' | 'skipped' = 'skipped';
       if (out.pushDevice) {
         try {
           await app.deps.push.send(out.pushDevice, { type: 'repeat_requested', scan_id: out.scan_id });
-        } catch {
-          // The review is committed; a push failure must not turn it into an error response.
+          push = 'sent';
+        } catch (err) {
+          push = 'failed';
+          req.log.error(
+            { err, scan_id: out.scan_id, device_id: out.pushDevice, request_id: String(req.id) },
+            'repeat_requested push failed',
+          );
+          // The review is committed, so the response stays 201; record the lost instruction in
+          // its own transaction. If this audit also fails, still do not fail the response.
+          try {
+            await withRls(app.deps.pool, actor, (c) =>
+              audit(c, {
+                eventType: 'device_event',
+                actorId: actor.id,
+                actorRole: actor.roles[0],
+                patientPseudonym: out.pseudonym,
+                resourceType: 'scan',
+                resourceId: out.scan_id,
+                outcome: 'push:repeat_requested_failed',
+              }),
+            );
+          } catch (aerr) {
+            req.log.error({ err: aerr, scan_id: out.scan_id }, 'push failure audit could not be written');
+          }
         }
       }
-      return reply.status(201).send({ review_id: out.review_id, scan_id: out.scan_id, status: out.status });
+      return reply.status(201).send({ review_id: out.review_id, scan_id: out.scan_id, status: out.status, push });
     },
   );
 
