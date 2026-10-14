@@ -8,6 +8,7 @@ CREATE TABLE idempotency_keys (
   route        text        NOT NULL,
   key          uuid        NOT NULL,
   payload_hash char(64)    NOT NULL,
+  owner        uuid        NOT NULL,  -- claim owner token; only the owner may store/release the claim
   status_code  int         NULL,
   response     jsonb       NULL,
   created_at   timestamptz NOT NULL DEFAULT now(),

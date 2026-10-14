@@ -12,8 +12,8 @@
 //   - same key + same payload hash -> stored response replayed (waits up to 5 s, polling every 100 ms,
 //     while the first request is in flight; if still in flight afterwards: 409 DS_IDEMPOTENCY_003).
 //   - same key + different payload -> 409 DS_IDEMPOTENCY_001.
-//   - rows older than 24 h (and claims in flight for > 60 s, i.e. a crashed worker) are treated as absent.
-import { createHash } from 'node:crypto';
+//   - rows older than 24 h (and claims in flight for > 5 min, i.e. a crashed worker) are treated as absent.
+import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import { actorOf } from './auth';
 import { withRls } from './db';
@@ -23,12 +23,13 @@ const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]
 const WAIT_MS = 5000;
 const POLL_MS = 100;
 const TTL = '24 hours';
-const STALE_CLAIM = '60 seconds';
+const STALE_CLAIM = '5 minutes';
 
 interface Claim {
   actorId: string;
   route: string;
   key: string;
+  owner: string;
 }
 
 declare module 'fastify' {
@@ -79,16 +80,18 @@ export function idempotent(): preHandlerAsyncHookHandler {
       throw new ApiError(400, 'DS_IDEMPOTENCY_002', 'Idempotency-Key header (UUID v4) is required');
     }
     const route = req.routeOptions.url ?? req.url;
-    const hash = payloadHash(req.body);
+    // Scope = path params + query + body, so the same key on /patients/A/x and /patients/B/x conflicts.
+    const hash = payloadHash({ params: req.params ?? {}, query: req.query ?? {}, body: req.body ?? null });
+    const owner = randomUUID();
     const pool = this.deps.pool;
     const deadline = Date.now() + WAIT_MS;
 
     for (;;) {
       const outcome: Outcome = await withRls(pool, actor, async (c): Promise<Outcome> => {
         const ins = await c.query(
-          `INSERT INTO idempotency_keys(actor_id, method, route, key, payload_hash)
-           VALUES ($1, 'POST', $2, $3, $4) ON CONFLICT DO NOTHING`,
-          [actor.id, route, key, hash],
+          `INSERT INTO idempotency_keys(actor_id, method, route, key, payload_hash, owner)
+           VALUES ($1, 'POST', $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+          [actor.id, route, key, hash, owner],
         );
         if (ins.rowCount === 1) return { kind: 'claimed' };
         const sel = await c.query<Row>(
@@ -103,9 +106,9 @@ export function idempotent(): preHandlerAsyncHookHandler {
           // Atomic takeover: only one concurrent request can win the reset.
           const up = await c.query(
             `UPDATE idempotency_keys
-                SET payload_hash = $4, status_code = NULL, response = NULL, created_at = now()
+                SET payload_hash = $4, owner = $5, status_code = NULL, response = NULL, created_at = now()
               WHERE actor_id = $1 AND method = 'POST' AND route = $2 AND key = $3 AND ${EXPIRED_SQL}`,
-            [actor.id, route, key, hash],
+            [actor.id, route, key, hash, owner],
           );
           return { kind: up.rowCount === 1 ? 'claimed' : 'retry' };
         }
@@ -115,7 +118,7 @@ export function idempotent(): preHandlerAsyncHookHandler {
       });
 
       if (outcome.kind === 'claimed') {
-        req.idempotencyClaim = { actorId: actor.id, route, key };
+        req.idempotencyClaim = { actorId: actor.id, route, key, owner };
         return;
       }
       if (outcome.kind === 'mismatch') {
@@ -156,26 +159,35 @@ export async function idempotencyPlugin(app: FastifyInstance): Promise<void> {
     if (!claim) return payload;
     req.idempotencyClaim = undefined;
     const status = reply.statusCode;
-    await withRls(app.deps.pool, actorOf(req), async (c) => {
-      const where = `actor_id = $1 AND method = 'POST' AND route = $2 AND key = $3`;
-      const args = [claim.actorId, claim.route, claim.key];
-      if (status >= 500) {
-        await c.query(`DELETE FROM idempotency_keys WHERE ${where} AND status_code IS NULL`, args);
-        return;
-      }
-      let body: string | null = null;
-      if (typeof payload === 'string' && payload !== '') {
-        try {
-          body = JSON.stringify(JSON.parse(payload));
-        } catch {
-          body = null;
+    // Crash window: the response is stored AFTER the handler's own transaction commits, so a crash
+    // (or a store failure) between the two leaves the claim in flight; a retry then waits and the
+    // claim is taken over once stale (5 min), re-running the handler (later routes rely on natural
+    // keys to stay duplicate-free). A store failure must never turn a success into a 500.
+    // Only the claim owner may write: a stale writer cannot clobber a newer claim.
+    try {
+      await withRls(app.deps.pool, actorOf(req), async (c) => {
+        const where = `actor_id = $1 AND method = 'POST' AND route = $2 AND key = $3 AND owner = $4`;
+        const args = [claim.actorId, claim.route, claim.key, claim.owner];
+        if (status >= 500) {
+          await c.query(`DELETE FROM idempotency_keys WHERE ${where} AND status_code IS NULL`, args);
+          return;
         }
-      }
-      await c.query(
-        `UPDATE idempotency_keys SET status_code = $4, response = $5::jsonb WHERE ${where} AND status_code IS NULL`,
-        [...args, status, body],
-      );
-    });
+        let body: string | null = null;
+        if (typeof payload === 'string' && payload !== '') {
+          try {
+            body = JSON.stringify(JSON.parse(payload));
+          } catch {
+            body = null;
+          }
+        }
+        await c.query(
+          `UPDATE idempotency_keys SET status_code = $5, response = $6::jsonb WHERE ${where} AND status_code IS NULL`,
+          [...args, status, body],
+        );
+      });
+    } catch (err) {
+      req.log.error({ err }, 'idempotency: failed to store response; claim left for stale takeover');
+    }
     return payload;
   });
 }
