@@ -255,6 +255,48 @@ describe('GET /v1/scans/:id/experimental', () => {
     expect((await get(SCAN_A)).json()).toEqual({ enabled: true, items: [] });
   });
 
+  it('revoked or excluded scan -> enabled with no items, still audited', async () => {
+    await setFlag(true);
+    await feature('rppg_face', 'heart_rate', 80, '2026-10-01T00:00:00Z');
+    for (const st of ['excluded', 'revoked']) {
+      await setStatus(SCAN_A, 'review_pending');
+      await pool.query(`UPDATE scans SET status=$2 WHERE id=$1`, [SCAN_A, st]);
+      const before = await viewAudits();
+      const r = await get(SCAN_A);
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toEqual({ enabled: true, items: [] });
+      expect(await viewAudits()).toBe(before + 1);
+    }
+  });
+
+  it('withdrawn consent (or no patient) -> enabled with no items, still audited', async () => {
+    await setFlag(true);
+    await feature('rppg_face', 'heart_rate', 80, '2026-10-01T00:00:00Z');
+    const w = await pool.query(
+      `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at,withdrawn_at)
+       SELECT $1, version, true, now(), now() FROM consent_versions WHERE is_current RETURNING id`,
+      [PATIENT_A],
+    );
+    try {
+      const before = await viewAudits();
+      expect((await get(SCAN_A)).json()).toEqual({ enabled: true, items: [] });
+      expect(await viewAudits()).toBe(before + 1);
+    } finally {
+      await pool.query('DELETE FROM consents WHERE id = $1', [w.rows[0].id]);
+    }
+    expect((await get(SCAN_A)).json().items).toHaveLength(1);
+    expect((await get(SCAN_NODEV)).json()).toEqual({ enabled: true, items: [] });
+  });
+
+  it('NaN values are never shown (the latest finite value per domain is used)', async () => {
+    await setFlag(true);
+    await feature('rppg_face', 'heart_rate', 72, '2026-10-01T00:00:00Z');
+    await feature('rppg_face', 'heart_rate', NaN, '2026-10-01T01:00:00Z', 'v2');
+    await feature('rppg_fingertip', 'heart_rate', NaN, '2026-10-01T00:00:00Z');
+    const r = await get(SCAN_A);
+    expect(r.json().items.map((i: { domain: string; pulse_rate_bpm: number }) => [i.domain, i.pulse_rate_bpm])).toEqual([['rppg_face', 72]]);
+  });
+
   it('other-site scan gives 404, researcher gives 403', async () => {
     expect((await get(SCAN_OTHER)).statusCode).toBe(404);
     expect((await get(SCAN_A, 'researcher')).statusCode).toBe(403);

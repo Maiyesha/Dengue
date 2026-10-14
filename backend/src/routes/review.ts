@@ -2,7 +2,8 @@
 //
 // Review challenge = sha256 hex of canonical JSON {scan_id, action, reason_code|null, note|null}.
 // webauthn_assertion_hash = sha256 hex of the canonical JSON of the submitted assertion.
-// Experimental view: only rppg_face / rppg_fingertip 'heart_rate', never any other feature.
+// Experimental view: only rppg_face / rppg_fingertip 'heart_rate', never any other feature, never NaN;
+// empty (but audited) for a revoked/excluded scan or a scan whose consent is no longer valid.
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -12,9 +13,11 @@ import { actorOf, requireUser } from '../auth';
 import { withRls } from '../db';
 import { audit, sha256Hex } from '../audit';
 import { idempotent } from '../idempotency';
+import { scanConsent } from '../consentGate';
 
 const NOTICE = 'Not validated — do not use for care decisions. Use the monitor value.';
 const FLAG = 'show_experimental_at_bedside';
+const HIDDEN_STATUSES = new Set(['revoked', 'excluded']);
 const notFound = () => new ApiError(404, 'DS_NOT_FOUND', 'Resource not found');
 
 const ACTION_STATUS = {
@@ -176,14 +179,20 @@ export async function reviewRoutes(app: FastifyInstance): Promise<void> {
         );
         if (flag.rows[0]?.enabled !== true) return { enabled: false, items: [] };
 
-        const f = await c.query<{ domain: string; value: string }>(
-          `SELECT DISTINCT ON (domain) domain, value::text AS value
-             FROM features
-            WHERE scan_id = $1 AND name = 'heart_rate' AND domain IN ('rppg_face','rppg_fingertip')
-              AND value IS NOT NULL
-            ORDER BY domain, feature_availability_timestamp DESC, pipeline_version DESC`,
-          [s.id],
-        );
+        // Nothing is shown for a revoked/excluded scan or when consent is no longer valid (same
+        // gate as capture); the view is still audited because the flag is on.
+        const gate = await scanConsent(c, s.id);
+        const hidden = HIDDEN_STATUSES.has(s.status) || !gate || gate.block !== null;
+        const f = hidden
+          ? { rows: [] as Array<{ domain: string; value: string }> }
+          : await c.query<{ domain: string; value: string }>(
+              `SELECT DISTINCT ON (domain) domain, value::text AS value
+                 FROM features
+                WHERE scan_id = $1 AND name = 'heart_rate' AND domain IN ('rppg_face','rppg_fingertip')
+                  AND value IS NOT NULL AND value <> 'NaN'
+                ORDER BY domain, feature_availability_timestamp DESC, pipeline_version DESC`,
+              [s.id],
+            );
         await audit(c, {
           eventType: 'view_experimental',
           actorId: actor.id,
