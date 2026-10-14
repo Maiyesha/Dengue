@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["db", "test", "vitest.config.ts"]
+  "include": ["db", "src", "test", "vitest.config.ts"]
 }
