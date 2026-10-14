@@ -4,8 +4,14 @@
 // Quality trigger: when, for every core step of the scan, the LATEST attempt has a video AND a
 // roi_trace artefact in received_verified, the scan moves capture_pending -> quality_pending.
 // The scan row is locked FOR UPDATE for declare/complete, so concurrent final completes
-// serialise and exactly one UPDATE ... WHERE status='capture_pending' affects a row; only that
-// request enqueues (after commit).
+// serialise and exactly one UPDATE ... WHERE status='capture_pending' affects a row. Enqueue is
+// at-least-once (F6): every complete that finds the scan quality_pending with its core artefacts
+// verified enqueues after commit (incl. retries); the quality worker dedupes by scan_id.
+//
+// Upload recovery (F5): complete passes size_bytes to the store; missing parts -> 409
+// DS_UPLOAD_005 (retryable, nothing changed). A completed-at-S3-but-rolled-back upload is
+// recognised by the store (NoSuchUpload + HeadObject). A rejected artefact (sha mismatch) can be
+// re-declared with the same sha: a new multipart upload is opened and the status returns to declared.
 //
 // Consent re-check (F2): declare and complete call scan_consent_rejection() right after the scan
 // is located; a withdrawn/superseded consent is 451 DS_REG_001/002 with a committed
@@ -118,7 +124,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
 
         const existing = (
           await c.query<ArtefactRow>(
-            `SELECT id, sha256, upload_id, status FROM artefacts
+            `SELECT id, sha256, object_key, upload_id, status FROM artefacts
               WHERE scan_id = $1 AND step = $2::capture_step AND attempt = $3 AND kind = $4`,
             [s.id, b.step, b.attempt, b.kind],
           )
@@ -127,7 +133,28 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           if (existing.sha256 !== sha) {
             throw new ApiError(409, 'DS_UPLOAD_003', 'Artefact already declared with a different sha256');
           }
-          return { kind: 'ok', created: false, id: existing.id, upload_id: existing.upload_id };
+          if (existing.status !== 'rejected') {
+            return { kind: 'ok', created: false, id: existing.id, upload_id: existing.upload_id };
+          }
+          // F5: a rejected artefact (sha mismatch) is re-uploaded under a NEW multipart upload.
+          if (s.status !== 'capture_pending') {
+            throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} does not accept artefacts`);
+          }
+          const uploadId = await app.deps.objectStore.createMultipart(existing.object_key);
+          await c.query(
+            `UPDATE artefacts SET upload_id = $2, size_bytes = $3, status = 'declared' WHERE id = $1 AND status = 'rejected'`,
+            [existing.id, uploadId, b.size_bytes],
+          );
+          await audit(c, {
+            eventType: auditEvent(actor),
+            actorId: actor.id,
+            actorRole: actorRole(actor),
+            patientPseudonym: gate.pseudonym,
+            resourceType: 'artefact',
+            resourceId: existing.id,
+            outcome: 'artefact:redeclare',
+          });
+          return { kind: 'ok', created: false, id: existing.id, upload_id: uploadId };
         }
 
         const att = await c.query(
@@ -219,8 +246,8 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           return { kind: 'consent' as const, code: gate.block };
         }
         const a = (
-          await c.query<ArtefactRow>(
-            'SELECT id, sha256, object_key, upload_id, status FROM artefacts WHERE id = $1',
+          await c.query<ArtefactRow & { size_bytes: string }>(
+            'SELECT id, sha256, object_key, upload_id, status, size_bytes FROM artefacts WHERE id = $1',
             [req.params.id],
           )
         ).rows[0];
@@ -228,7 +255,12 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
 
         let verified = a.status === 'received_verified';
         if (!verified) {
-          if (a.status !== 'rejected') await app.deps.objectStore.completeMultipart(a.object_key, a.upload_id ?? '');
+          if (a.status !== 'rejected') {
+            const size = Number(a.size_bytes);
+            const done = await app.deps.objectStore.completeMultipart(a.object_key, a.upload_id ?? '', size);
+            // Parts missing: nothing has been written yet; commit the empty transaction and report.
+            if (!done.completed) return { kind: 'incomplete' as const, received: done.receivedBytes, size };
+          }
           const actual = (await app.deps.objectStore.sha256(a.object_key)).toLowerCase();
           verified = actual === a.sha256.toLowerCase();
           await c.query('UPDATE artefacts SET status = $2 WHERE id = $1', [
@@ -247,18 +279,32 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         }
         if (!verified) return { kind: 'mismatch' as const };
 
+        // F6: enqueue at least once. Whenever the scan is (now) quality_pending and its core
+        // artefacts are verified, enqueue after commit -- also on a retry, so an enqueue that failed
+        // after an earlier commit is redelivered. The quality worker must dedupe by scan_id.
         let enqueue = false;
         if (await coreArtefactsVerified(c, s.id)) {
-          const u = await c.query(
+          await c.query(
             `UPDATE scans SET status = 'quality_pending' WHERE id = $1 AND status = 'capture_pending'`,
             [s.id],
           );
-          enqueue = (u.rowCount ?? 0) > 0;
+          const now = (await c.query<{ status: string }>('SELECT status::text AS status FROM scans WHERE id = $1', [s.id]))
+            .rows[0];
+          enqueue = now?.status === 'quality_pending';
         }
         return { kind: 'verified' as const, enqueue, scanId: s.id };
       });
 
       if (out.kind === 'consent') throw new ApiError(451, out.code, CONSENT_MESSAGES[out.code]);
+      if (out.kind === 'incomplete') {
+        // Retryable: the claim is released so the same Idempotency-Key can be reused once the
+        // remaining parts are uploaded.
+        req.idempotencyRelease = true;
+        throw new ApiError(409, 'DS_UPLOAD_005', 'Upload is incomplete: uploaded parts are smaller than size_bytes', {
+          received_bytes: out.received,
+          size_bytes: out.size,
+        });
+      }
       if (out.kind === 'mismatch') {
         throw new ApiError(422, 'DS_UPLOAD_001', 'Uploaded object sha256 does not match the declared value');
       }

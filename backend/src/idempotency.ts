@@ -9,7 +9,8 @@
 // Protocol: Idempotency-Key header (UUID v4), else 400 DS_IDEMPOTENCY_002.
 //   - first request inserts a claim row (status_code NULL) ON CONFLICT DO NOTHING and runs the handler;
 //     the response (status + JSON body) is stored in onSend when it is 2xx or 400/404/409/422/451;
-//     any other status (401, 403, 408, 429, 5xx, ...) releases the claim so a retry re-runs.
+//     any other status (401, 403, 408, 429, 5xx, ...) releases the claim so a retry re-runs; a handler
+//     may also release a stored-class error it knows to be retryable (req.idempotencyRelease).
 //   - same key + same payload hash -> stored response replayed (waits up to 5 s, polling every 100 ms,
 //     while the first request is in flight; if still in flight afterwards: 409 DS_IDEMPOTENCY_003).
 //   - same key + different payload -> 409 DS_IDEMPOTENCY_001.
@@ -36,6 +37,8 @@ interface Claim {
 declare module 'fastify' {
   interface FastifyRequest {
     idempotencyClaim?: Claim;
+    /** Set by a handler for a retryable error that must not be stored (e.g. 409 DS_UPLOAD_005). */
+    idempotencyRelease?: boolean;
   }
   interface FastifyContextConfig {
     idempotencyExempt?: boolean;
@@ -178,7 +181,7 @@ export async function idempotencyPlugin(app: FastifyInstance): Promise<void> {
       await withRls(app.deps.pool, actorOf(req), async (c) => {
         const where = `actor_id = $1 AND method = 'POST' AND route = $2 AND key = $3 AND owner = $4`;
         const args = [claim.actorId, claim.route, claim.key, claim.owner];
-        if (!isStorable(status)) {
+        if (!isStorable(status) || req.idempotencyRelease) {
           await c.query(`DELETE FROM idempotency_keys WHERE ${where} AND status_code IS NULL`, args);
           return;
         }

@@ -9,10 +9,18 @@ export interface DeviceClaims {
   site_id: string;
 }
 
+/** completed:false = the uploaded parts add up to fewer than the declared size_bytes. */
+export type CompleteResult = { completed: true } | { completed: false; receivedBytes: number };
+
 export interface ObjectStore {
   createMultipart(key: string): Promise<string /* uploadId */>;
   presignPart(key: string, uploadId: string, partNumber: number, ttlSec: 900): Promise<string>;
-  completeMultipart(key: string, uploadId: string): Promise<void>;
+  /**
+   * Completes the multipart upload if its parts add up to at least `expectedBytes`.
+   * Retry-safe: if the upload id is gone (already completed) but the object exists, it reports
+   * completed. Throws if neither the upload nor the object exists.
+   */
+  completeMultipart(key: string, uploadId: string, expectedBytes: number): Promise<CompleteResult>;
   sha256(key: string): Promise<string>;
 }
 

@@ -33,6 +33,74 @@ describe('S3ObjectStore', () => {
     expect(sent[0].input).not.toHaveProperty('ChecksumAlgorithm');
   });
 
+  const s3Error = (name: string, status: number) =>
+    Object.assign(new Error(name), { name, Code: name, $metadata: { httpStatusCode: status } });
+
+  describe('completeMultipart', () => {
+    it('sums ListParts sizes across pages and completes when the total reaches size_bytes', async () => {
+      const { client, sent } = mockClient((cmd) => {
+        if (cmd.constructor.name === 'ListPartsCommand') {
+          return cmd.input.PartNumberMarker === undefined
+            ? { Parts: [{ PartNumber: 1, ETag: '"e1"', Size: 6 }], IsTruncated: true, NextPartNumberMarker: '1' }
+            : { Parts: [{ PartNumber: 2, ETag: '"e2"', Size: 4 }], IsTruncated: false };
+        }
+        return {};
+      });
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      expect(await store.completeMultipart('k', 'u1', 10)).toEqual({ completed: true });
+      const complete = sent.find((s) => s.name === 'CompleteMultipartUploadCommand');
+      expect(complete?.input.MultipartUpload).toEqual({ Parts: [{ PartNumber: 1, ETag: '"e1"' }, { PartNumber: 2, ETag: '"e2"' }] });
+    });
+
+    it('fewer bytes than size_bytes -> incomplete, no CompleteMultipartUpload sent', async () => {
+      const { client, sent } = mockClient((cmd) =>
+        cmd.constructor.name === 'ListPartsCommand' ? { Parts: [{ PartNumber: 1, ETag: '"e1"', Size: 6 }], IsTruncated: false } : {},
+      );
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      expect(await store.completeMultipart('k', 'u1', 10)).toEqual({ completed: false, receivedBytes: 6 });
+      expect(sent.map((s) => s.name)).toEqual(['ListPartsCommand']);
+    });
+
+    it('NoSuchUpload on ListParts + object exists (HeadObject) -> already completed', async () => {
+      const { client, sent } = mockClient((cmd) => {
+        if (cmd.constructor.name === 'ListPartsCommand') throw s3Error('NoSuchUpload', 404);
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: 10 };
+        throw new Error(`unexpected ${cmd.constructor.name}`);
+      });
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      expect(await store.completeMultipart('k', 'u1', 10)).toEqual({ completed: true });
+      expect(sent.map((s) => s.name)).toEqual(['ListPartsCommand', 'HeadObjectCommand']);
+      expect(sent[1].input).toEqual({ Bucket: 'b', Key: 'k' });
+    });
+
+    it('NoSuchUpload on CompleteMultipartUpload + object exists -> already completed', async () => {
+      const { client } = mockClient((cmd) => {
+        if (cmd.constructor.name === 'ListPartsCommand') return { Parts: [{ PartNumber: 1, ETag: '"e1"', Size: 10 }] };
+        if (cmd.constructor.name === 'CompleteMultipartUploadCommand') throw s3Error('NoSuchUpload', 404);
+        return {};
+      });
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      expect(await store.completeMultipart('k', 'u1', 10)).toEqual({ completed: true });
+    });
+
+    it('NoSuchUpload and no object -> rejects', async () => {
+      const { client } = mockClient((cmd) => {
+        if (cmd.constructor.name === 'ListPartsCommand') throw s3Error('NoSuchUpload', 404);
+        throw s3Error('NotFound', 404);
+      });
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      await expect(store.completeMultipart('k', 'u1', 10)).rejects.toThrow(/NoSuchUpload/);
+    });
+
+    it('other S3 errors propagate', async () => {
+      const { client } = mockClient(() => {
+        throw s3Error('InternalError', 500);
+      });
+      const store = new S3ObjectStore({ bucket: 'b', client });
+      await expect(store.completeMultipart('k', 'u1', 10)).rejects.toThrow(/InternalError/);
+    });
+  });
+
   it('presignPart URL carries no checksum parameters', async () => {
     // Presigning is offline: build the store's own client with dummy credentials.
     process.env.AWS_ACCESS_KEY_ID = 'a';

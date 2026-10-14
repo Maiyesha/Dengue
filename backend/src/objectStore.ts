@@ -3,13 +3,19 @@ import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListPartsCommand,
   S3Client,
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import type { ObjectStore } from './deps';
+import type { CompleteResult, ObjectStore } from './deps';
+
+const isNoSuchUpload = (e: unknown) => {
+  const x = e as { name?: string; Code?: string } | null;
+  return x?.name === 'NoSuchUpload' || x?.Code === 'NoSuchUpload';
+};
 
 export class S3ObjectStore implements ObjectStore {
   private readonly s3: S3Client;
@@ -40,29 +46,60 @@ export class S3ObjectStore implements ObjectStore {
     );
   }
 
-  async completeMultipart(key: string, uploadId: string): Promise<void> {
+  /**
+   * CompleteMultipartUpload is not idempotent at S3: once it succeeds the upload id is gone and a
+   * retry gets NoSuchUpload. That happens when our DB transaction rolled back after S3 completed,
+   * so on NoSuchUpload (from ListParts or Complete) we HeadObject the key: if the object exists the
+   * upload was completed earlier and we report success; otherwise the original error is rethrown.
+   * Before completing, the ListParts sizes are summed; fewer bytes than `expectedBytes` means parts
+   * are still missing, reported as { completed: false } without touching the upload.
+   */
+  async completeMultipart(key: string, uploadId: string, expectedBytes: number): Promise<CompleteResult> {
     const parts: Array<{ PartNumber: number; ETag: string }> = [];
-    let marker: string | undefined;
-    for (;;) {
-      const r = await this.s3.send(
-        new ListPartsCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId, PartNumberMarker: marker }),
-      );
-      for (const p of r.Parts ?? []) {
-        if (p.PartNumber !== undefined && p.ETag) {
-          parts.push({ PartNumber: p.PartNumber, ETag: p.ETag });
+    let received = 0;
+    try {
+      let marker: string | undefined;
+      for (;;) {
+        const r = await this.s3.send(
+          new ListPartsCommand({ Bucket: this.bucket, Key: key, UploadId: uploadId, PartNumberMarker: marker }),
+        );
+        for (const p of r.Parts ?? []) {
+          if (p.PartNumber !== undefined && p.ETag) {
+            parts.push({ PartNumber: p.PartNumber, ETag: p.ETag });
+            received += p.Size ?? 0;
+          }
         }
+        if (!r.IsTruncated) break;
+        marker = r.NextPartNumberMarker;
       }
-      if (!r.IsTruncated) break;
-      marker = r.NextPartNumberMarker;
+    } catch (e) {
+      return this.completedEarlier(key, e);
     }
-    await this.s3.send(
-      new CompleteMultipartUploadCommand({
-        Bucket: this.bucket,
-        Key: key,
-        UploadId: uploadId,
-        MultipartUpload: { Parts: parts },
-      }),
-    );
+    if (received < expectedBytes) return { completed: false, receivedBytes: received };
+    try {
+      await this.s3.send(
+        new CompleteMultipartUploadCommand({
+          Bucket: this.bucket,
+          Key: key,
+          UploadId: uploadId,
+          MultipartUpload: { Parts: parts },
+        }),
+      );
+    } catch (e) {
+      return this.completedEarlier(key, e);
+    }
+    return { completed: true };
+  }
+
+  /** NoSuchUpload + existing object => completed by an earlier call; anything else rethrows `err`. */
+  private async completedEarlier(key: string, err: unknown): Promise<CompleteResult> {
+    if (!isNoSuchUpload(err)) throw err;
+    try {
+      await this.s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+    } catch {
+      throw err;
+    }
+    return { completed: true };
   }
 
   /**

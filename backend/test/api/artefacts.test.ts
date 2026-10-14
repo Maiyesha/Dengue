@@ -190,7 +190,7 @@ describe('artefact uploads', () => {
     expect(await statusOf(scan)).toBe('capture_pending');
   });
 
-  it('enqueue called exactly once after last core artefact', async () => {
+  it('enqueue after the last core artefact; a re-complete enqueues again (at least once)', async () => {
     const scan = await mkScan();
     const q = ta.fakes.qualityQueue.enqueued;
     const count = () => q.filter((x) => x === scan).length;
@@ -204,13 +204,109 @@ describe('artefact uploads', () => {
     expect(last.statusCode).toBe(200);
     expect(count()).toBe(1);
     expect(await statusOf(scan)).toBe('quality_pending');
-    // Re-completing an already verified artefact does not enqueue again.
+    // Re-completing (a client retry) enqueues again: delivery is at-least-once, the quality worker
+    // dedupes by scan_id.
     const id = (await pool.query(`SELECT id FROM artefacts WHERE scan_id = $1 AND kind = 'roi_trace' AND step = 'fingertip_ppg'`, [scan])).rows[0].id;
     expect((await post(`/v1/artefacts/${id}/complete`)).statusCode).toBe(200);
-    expect(count()).toBe(1);
+    expect(count()).toBe(2);
   });
 
-  it('two concurrent final completes enqueue once', async () => {
+  it('enqueue failure after commit: the retry with the same key enqueues (F6)', async () => {
+    const scan = await mkScan();
+    await upload(scan, 'neutral_face', 'video');
+    await upload(scan, 'neutral_face', 'roi_trace');
+    await upload(scan, 'fingertip_ppg', 'video');
+    const d = await declare(scan, 'fingertip_ppg', 'roi_trace', 'last');
+    ta.fakes.objectStore.put(keyOf(scan, 'fingertip_ppg', 'roi_trace'), sha('last'));
+    ta.fakes.qualityQueue.fail = 1;
+    const key = randomUUID();
+    const first = await post(`/v1/artefacts/${d.json().artefact_id}/complete`, {}, { key });
+    expect(first.statusCode).toBe(500);
+    expect(await statusOf(scan)).toBe('quality_pending'); // committed before the enqueue
+    expect(ta.fakes.qualityQueue.enqueued.filter((x) => x === scan)).toHaveLength(0);
+    const retry = await post(`/v1/artefacts/${d.json().artefact_id}/complete`, {}, { key });
+    expect(retry.statusCode).toBe(200);
+    expect(ta.fakes.qualityQueue.enqueued.filter((x) => x === scan)).toHaveLength(1);
+  });
+
+  it('S3 completed but the DB rolled back: the complete retry succeeds (F5)', async () => {
+    const scan = await mkScan();
+    const d = await declare(scan, 'neutral_face', 'video', 'body');
+    ta.fakes.objectStore.put(keyOf(scan, 'neutral_face', 'video'), sha('body'));
+    ta.fakes.objectStore.failSha256 = 1; // fails after CompleteMultipartUpload succeeded
+    const key = randomUUID();
+    const first = await post(`/v1/artefacts/${d.json().artefact_id}/complete`, {}, { key });
+    expect(first.statusCode).toBe(500);
+    const row = async () => (await pool.query('SELECT status FROM artefacts WHERE id = $1', [d.json().artefact_id])).rows[0].status;
+    expect(await row()).toBe('declared');
+    const retry = await post(`/v1/artefacts/${d.json().artefact_id}/complete`, {}, { key });
+    expect(retry.statusCode).toBe(200);
+    expect(await row()).toBe('received_verified');
+  });
+
+  it('short upload -> 409 DS_UPLOAD_005 (status unchanged); completes once the remaining parts arrive', async () => {
+    const scan = await mkScan();
+    const d = await declare(scan, 'neutral_face', 'video', 'parts'); // size_bytes 10
+    const id = d.json().artefact_id;
+    const k = keyOf(scan, 'neutral_face', 'video');
+    expect((await post(`/v1/artefacts/${id}/parts/1/url`)).statusCode).toBe(200);
+    ta.fakes.objectStore.put(k, sha('parts'), { full: false });
+    ta.fakes.objectStore.uploadPart(k, 1, 4);
+    const key = randomUUID();
+    const short = await post(`/v1/artefacts/${id}/complete`, {}, { key });
+    expect(short.statusCode).toBe(409);
+    expect(short.json().error.code).toBe('DS_UPLOAD_005');
+    expect(short.json().error.detail).toEqual({ received_bytes: 4, size_bytes: 10 });
+    expect((await pool.query('SELECT status FROM artefacts WHERE id = $1', [id])).rows[0].status).toBe('uploading');
+    ta.fakes.objectStore.uploadPart(k, 2, 6);
+    const done = await post(`/v1/artefacts/${id}/complete`, {}, { key }); // same key: not a stored replay
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toEqual({ status: 'received_verified' });
+  });
+
+  it('rejected artefact: re-declare with the same sha opens a new upload and can then be verified', async () => {
+    const scan = await mkScan();
+    const k = keyOf(scan, 'neutral_face', 'video');
+    const d = await declare(scan, 'neutral_face', 'video', 'good');
+    ta.fakes.objectStore.put(k, sha('corrupted'));
+    expect((await post(`/v1/artefacts/${d.json().artefact_id}/complete`)).statusCode).toBe(422);
+    const again = await declare(scan, 'neutral_face', 'video', 'good');
+    expect(again.statusCode).toBe(200);
+    expect(again.json().artefact_id).toBe(d.json().artefact_id);
+    expect(again.json().upload_id).not.toBe(d.json().upload_id);
+    const row = (await pool.query('SELECT status, upload_id FROM artefacts WHERE id = $1', [d.json().artefact_id])).rows[0];
+    expect(row).toEqual({ status: 'declared', upload_id: again.json().upload_id });
+    ta.fakes.objectStore.put(k, sha('good'));
+    const ok = await post(`/v1/artefacts/${d.json().artefact_id}/complete`);
+    expect(ok.statusCode).toBe(200);
+    // A different sha on a rejected artefact is still DS_UPLOAD_003.
+    expect((await declare(scan, 'neutral_face', 'video', 'other')).json().error.code).toBe('DS_UPLOAD_003');
+  });
+
+  it('part url for a verified or rejected artefact -> 409 DS_UPLOAD_004', async () => {
+    const scan = await mkScan();
+    const v = await upload(scan, 'neutral_face', 'video');
+    expect(v.statusCode).toBe(200);
+    const vid = (await pool.query(`SELECT id FROM artefacts WHERE scan_id = $1 AND kind = 'video'`, [scan])).rows[0].id;
+    const r = await post(`/v1/artefacts/${vid}/parts/1/url`);
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error.code).toBe('DS_UPLOAD_004');
+    const d = await declare(scan, 'neutral_face', 'roi_trace', 'x');
+    ta.fakes.objectStore.put(keyOf(scan, 'neutral_face', 'roi_trace'), sha('y'));
+    expect((await post(`/v1/artefacts/${d.json().artefact_id}/complete`)).statusCode).toBe(422);
+    expect((await post(`/v1/artefacts/${d.json().artefact_id}/parts/1/url`)).json().error.code).toBe('DS_UPLOAD_004');
+  });
+
+  it('declare on a scan that no longer accepts artefacts -> 409 DS_STATE_001', async () => {
+    for (const st of ['quality_pending', 'quality_failed']) {
+      const scan = await mkScan(st);
+      const r = await declare(scan, 'neutral_face', 'video', 'a');
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error.code).toBe('DS_STATE_001');
+    }
+  });
+
+  it('two concurrent final completes: at least one enqueue, scan quality_pending', async () => {
     const scan = await mkScan();
     await upload(scan, 'neutral_face', 'video');
     await upload(scan, 'neutral_face', 'roi_trace');
@@ -223,7 +319,9 @@ describe('artefact uploads', () => {
     }
     const rs = await Promise.all([ids[0], ids[1], ids[1], ids[0]].map((id) => post(`/v1/artefacts/${id}/complete`)));
     expect(rs.map((x) => x.statusCode)).toEqual([200, 200, 200, 200]);
-    expect(ta.fakes.qualityQueue.enqueued.filter((x) => x === scan)).toHaveLength(1);
+    // Exactly one request performs the transition; requests serialised after it may enqueue again
+    // (at-least-once, F6). The worker dedupes.
+    expect(ta.fakes.qualityQueue.enqueued.filter((x) => x === scan).length).toBeGreaterThanOrEqual(1);
     expect(await statusOf(scan)).toBe('quality_pending');
   });
 

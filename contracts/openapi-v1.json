@@ -46,6 +46,7 @@
           "DS_UPLOAD_002",
           "DS_UPLOAD_003",
           "DS_UPLOAD_004",
+          "DS_UPLOAD_005",
           "DS_VALIDATION_001"
         ],
         "type": "string"
@@ -250,7 +251,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "422": {
             "content": {
@@ -400,7 +401,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -683,7 +684,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -791,7 +792,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -906,7 +907,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -1391,7 +1392,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -1891,7 +1892,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "451": {
             "content": {
@@ -2297,7 +2298,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "422": {
             "content": {
@@ -2579,7 +2580,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "422": {
             "content": {
@@ -2827,7 +2828,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "422": {
             "content": {
@@ -3031,7 +3032,7 @@
                 }
               }
             },
-            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)"
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
           },
           "500": {
             "content": {
@@ -3397,6 +3398,11 @@
       "code": "DS_UPLOAD_004",
       "http_status": 409,
       "meaning": "The artefact status does not accept upload parts."
+    },
+    {
+      "code": "DS_UPLOAD_005",
+      "http_status": 409,
+      "meaning": "The upload is incomplete: the uploaded parts add up to fewer bytes than size_bytes (detail: received_bytes, size_bytes). Retryable: upload the missing parts and complete again (the same Idempotency-Key may be reused). The artefact status is unchanged."
     },
     {
       "code": "DS_VALIDATION_001",

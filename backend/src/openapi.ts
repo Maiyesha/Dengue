@@ -51,6 +51,7 @@ export const ERROR_CATALOG: readonly ErrorCatalogEntry[] = [
   { code: 'DS_UPLOAD_002', http_status: 422, meaning: 'No such step attempt exists for this scan.' },
   { code: 'DS_UPLOAD_003', http_status: 409, meaning: 'The artefact was already declared with a different sha256.' },
   { code: 'DS_UPLOAD_004', http_status: 409, meaning: 'The artefact status does not accept upload parts.' },
+  { code: 'DS_UPLOAD_005', http_status: 409, meaning: 'The upload is incomplete: the uploaded parts add up to fewer bytes than size_bytes (detail: received_bytes, size_bytes). Retryable: upload the missing parts and complete again (the same Idempotency-Key may be reused). The artefact status is unchanged.' },
   { code: 'DS_VALIDATION_001', http_status: 400, meaning: 'Request validation failed (unknown field, wrong type, out of range). detail.issues lists the problems.' },
 ];
 
@@ -254,7 +255,7 @@ const ERROR_STATUS_TEXT: Record<number, string> = {
   401: 'Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)',
   403: 'Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)',
   404: 'Not found or not visible to the caller (DS_NOT_FOUND)',
-  409: 'Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004, DS_CLINICAL_001, DS_DEVICE_005)',
+  409: 'Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)',
   422: 'Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)',
   429: 'Rate limited (DS_RATE_001)',
   451: 'Consent gate (DS_REG_001 / DS_REG_002)',
