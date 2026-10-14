@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { requireUser } from '../../src/auth';
 import { idempotent, idempotencyPlugin } from '../../src/idempotency';
+import { ApiError } from '../../src/errors';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A } from '../fixtures';
 import { buildTestApp, tokenFor, bearer } from './helpers';
@@ -12,6 +13,7 @@ let app: FastifyInstance;
 let calls = 0;
 let failNext = false;
 let delays: number[] = [];
+let failWith: Array<{ status: number; code: string }> = [];
 
 const post = async (key: string | undefined, payload: object, token?: string) =>
   app.inject({
@@ -41,6 +43,13 @@ beforeAll(async () => {
       a.post('/v1/t/p/:id', { preHandler: [requireUser('nurse_operator'), idempotent()] }, async (req) => ({
         id: (req.params as { id: string }).id,
       }));
+      // Fails with the queued status (if any), else 201. Used for the store/release policy.
+      a.post('/v1/t/status', { preHandler: [requireUser('nurse_operator'), idempotent()] }, async (_req, reply) => {
+        const n = ++calls;
+        const st = failWith.shift();
+        if (st) throw new ApiError(st.status, st.code, 'test failure');
+        return reply.status(201).send({ n });
+      });
     });
   }));
 });
@@ -118,6 +127,49 @@ describe('idempotency', () => {
     const b = await post(key, { x: 1 });
     expect(b.statusCode).toBe(201);
     expect(calls).toBe(2);
+  });
+
+  const postStatus = async (key: string) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/t/status',
+      headers: { ...bearer(await tokenFor('nurse_operator', SITE_A)), 'idempotency-key': key },
+      payload: { s: 1 },
+    });
+
+  it('403 DS_AUD_001 releases the claim: a retry with the same key re-runs the handler', async () => {
+    const key = randomUUID();
+    calls = 0;
+    failWith = [{ status: 403, code: 'DS_AUD_001' }];
+    const a = await postStatus(key);
+    expect(a.statusCode).toBe(403);
+    expect(a.json().error.code).toBe('DS_AUD_001');
+    const b = await postStatus(key);
+    expect(b.statusCode).toBe(201);
+    expect(b.headers['idempotent-replayed']).toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  it('401 / 408 / 429 / 503 are released; 400 / 404 / 409 / 422 / 451 are stored and replayed', async () => {
+    for (const status of [401, 408, 429, 503]) {
+      const key = randomUUID();
+      calls = 0;
+      failWith = [{ status, code: 'DS_TEST_001' }];
+      expect((await postStatus(key)).statusCode).toBe(status);
+      expect((await postStatus(key)).statusCode).toBe(201);
+      expect(calls, String(status)).toBe(2);
+    }
+    for (const status of [400, 404, 409, 422, 451]) {
+      const key = randomUUID();
+      calls = 0;
+      failWith = [{ status, code: 'DS_TEST_001' }];
+      expect((await postStatus(key)).statusCode).toBe(status);
+      const again = await postStatus(key);
+      expect(again.statusCode, String(status)).toBe(status);
+      expect(again.headers['idempotent-replayed']).toBe('true');
+      expect(calls, String(status)).toBe(1);
+    }
+    failWith = [];
   });
 
   it('same key and body on a different path param -> 409, never a replay', async () => {

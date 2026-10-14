@@ -18,8 +18,11 @@ export class FakeObjectStore implements ObjectStore {
     this.uploads.set(uploadId, { key, completed: false });
     return uploadId;
   }
+  private signed = 0;
   async presignPart(key: string, uploadId: string, partNumber: number, ttlSec: 900): Promise<string> {
-    return `https://fake-s3.local/${encodeURIComponent(key)}?uploadId=${uploadId}&partNumber=${partNumber}&X-Amz-Expires=${ttlSec}`;
+    // Like a real presign (X-Amz-Date / signature), every URL is distinct.
+    const sig = ++this.signed;
+    return `https://fake-s3.local/${encodeURIComponent(key)}?uploadId=${uploadId}&partNumber=${partNumber}&X-Amz-Expires=${ttlSec}&X-Amz-Signature=${sig}`;
   }
   async completeMultipart(_key: string, uploadId: string): Promise<void> {
     const u = this.uploads.get(uploadId);

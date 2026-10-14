@@ -167,7 +167,9 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
 
   r.post(
     '/v1/artefacts/:id/parts/:n/url',
-    { preHandler: [who, idempotent()], schema: { params: PartParams } },
+    // Exempt from idempotency: a stored response would replay a stale (possibly expired) presigned
+    // URL. Re-issuing a URL is safe; the declared -> uploading move is guarded by its WHERE.
+    { preHandler: [who], config: { idempotencyExempt: true }, schema: { params: PartParams } },
     async (req) => {
       const actor = actorOf(req);
       const a = await withRls(app.deps.pool, actor, async (c) => {

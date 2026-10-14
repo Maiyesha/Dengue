@@ -208,8 +208,8 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
     idempotent: true, ok: { 200: R.ArtefactDeclared, 201: R.ArtefactDeclared }, errors: [404, 422, 451],
   },
   'POST /v1/artefacts/{id}/parts/{n}/url': {
-    operationId: 'getArtefactPartUrl', summary: 'Pre-signed URL for one upload part (valid 900 s)', tag: 'artefacts', auth: 'user_or_device', roles: SITE,
-    idempotent: true, ok: { 200: R.PartUrl }, errors: [404],
+    operationId: 'getArtefactPartUrl', summary: 'Pre-signed URL for one upload part (valid 900 s; no Idempotency-Key, every call returns a fresh URL)', tag: 'artefacts', auth: 'user_or_device', roles: SITE,
+    ok: { 200: R.PartUrl }, errors: [400, 404, 409],
   },
   'POST /v1/artefacts/{id}/complete': {
     operationId: 'completeArtefact', summary: 'Complete the upload and verify sha256; may trigger the quality gate', tag: 'artefacts', auth: 'user_or_device', roles: SITE,

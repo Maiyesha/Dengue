@@ -143,6 +143,28 @@ describe('artefact uploads', () => {
     expect((await post(`/v1/artefacts/${id}/parts/10000/url`)).statusCode).toBe(200);
   });
 
+  it('part url is not idempotency-stored: the same key returns a fresh URL each call', async () => {
+    const scan = await mkScan();
+    const id = (await declare(scan, 'neutral_face', 'video', 'a')).json().artefact_id;
+    const key = randomUUID();
+    const a = await post(`/v1/artefacts/${id}/parts/1/url`, {}, { key });
+    const b = await post(`/v1/artefacts/${id}/parts/1/url`, {}, { key });
+    expect(a.statusCode).toBe(200);
+    expect(b.statusCode).toBe(200);
+    expect(b.headers['idempotent-replayed']).toBeUndefined();
+    expect(b.json().url).not.toBe(a.json().url);
+    const stored = await pool.query(`SELECT 1 FROM idempotency_keys WHERE key = $1`, [key]);
+    expect(stored.rowCount).toBe(0);
+    // No Idempotency-Key at all is fine too.
+    const c = await app.inject({
+      method: 'POST',
+      url: `/v1/artefacts/${id}/parts/2/url`,
+      headers: bearer(await tokenFor('nurse_operator', SITE_A)),
+      payload: {},
+    });
+    expect(c.statusCode).toBe(200);
+  });
+
   it('complete with matching sha -> received_verified', async () => {
     const scan = await mkScan();
     const r = await upload(scan, 'neutral_face', 'video');

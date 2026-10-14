@@ -325,9 +325,6 @@
               "minimum": 1,
               "type": "integer"
             }
-          },
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
           }
         ],
         "responses": {
@@ -424,7 +421,7 @@
             "deviceBearer": []
           }
         ],
-        "summary": "Pre-signed URL for one upload part (valid 900 s)",
+        "summary": "Pre-signed URL for one upload part (valid 900 s; no Idempotency-Key, every call returns a fresh URL)",
         "tags": [
           "artefacts"
         ],

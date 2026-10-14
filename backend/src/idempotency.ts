@@ -8,7 +8,8 @@
 //
 // Protocol: Idempotency-Key header (UUID v4), else 400 DS_IDEMPOTENCY_002.
 //   - first request inserts a claim row (status_code NULL) ON CONFLICT DO NOTHING and runs the handler;
-//     the response (status + JSON body) is stored in onSend. 5xx responses release the claim so a retry re-runs.
+//     the response (status + JSON body) is stored in onSend when it is 2xx or 400/404/409/422/451;
+//     any other status (401, 403, 408, 429, 5xx, ...) releases the claim so a retry re-runs.
 //   - same key + same payload hash -> stored response replayed (waits up to 5 s, polling every 100 ms,
 //     while the first request is in flight; if still in flight afterwards: 409 DS_IDEMPOTENCY_003).
 //   - same key + different payload -> 409 DS_IDEMPOTENCY_001.
@@ -140,6 +141,14 @@ export function idempotent(): preHandlerAsyncHookHandler {
   return handler;
 }
 
+/**
+ * Responses that are a deterministic answer to the payload and are stored for replay: every 2xx,
+ * and 400 / 404 / 409 / 422 / 451. Everything else (401, 403 incl. DS_AUD_001, 408, 429, 5xx, ...)
+ * is transient or about the credentials, so the claim is released and a retry re-runs the handler.
+ */
+const STORED_ERRORS = new Set([400, 404, 409, 422, 451]);
+export const isStorable = (status: number) => (status >= 200 && status < 300) || STORED_ERRORS.has(status);
+
 const hasMarker = (h: unknown): boolean =>
   Array.isArray(h) ? h.some(hasMarker) : typeof h === 'function' && (h as { isIdempotency?: boolean }).isIdempotency === true;
 
@@ -153,7 +162,8 @@ export async function idempotencyPlugin(app: FastifyInstance): Promise<void> {
     throw new Error(`POST ${opts.url} must use idempotent() in preHandler (or set config.idempotencyExempt)`);
   });
 
-  // Store the response of a claimed request; release the claim on 5xx so the client can retry.
+  // Store the response of a claimed request when it is a final answer for this payload; release
+  // the claim otherwise so the client can retry with the same key.
   app.addHook('onSend', async (req, reply, payload) => {
     const claim = req.idempotencyClaim;
     if (!claim) return payload;
@@ -168,7 +178,7 @@ export async function idempotencyPlugin(app: FastifyInstance): Promise<void> {
       await withRls(app.deps.pool, actorOf(req), async (c) => {
         const where = `actor_id = $1 AND method = 'POST' AND route = $2 AND key = $3 AND owner = $4`;
         const args = [claim.actorId, claim.route, claim.key, claim.owner];
-        if (status >= 500) {
+        if (!isStorable(status)) {
           await c.query(`DELETE FROM idempotency_keys WHERE ${where} AND status_code IS NULL`, args);
           return;
         }
