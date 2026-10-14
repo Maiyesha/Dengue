@@ -2,18 +2,14 @@
 import {
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
-  GetObjectAttributesCommand,
+  GetObjectCommand,
   ListPartsCommand,
   S3Client,
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
+import { createHash } from 'node:crypto';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { ObjectStore } from './deps';
-
-/** S3 reports ChecksumSHA256 as base64; the API compares lowercase hex. */
-export function base64ToHex(b64: string): string {
-  return Buffer.from(b64, 'base64').toString('hex');
-}
 
 export class S3ObjectStore implements ObjectStore {
   private readonly s3: S3Client;
@@ -25,12 +21,12 @@ export class S3ObjectStore implements ObjectStore {
     if (!bucket) throw new Error('S3_BUCKET is not set');
     if (!region && !opts.client) throw new Error('S3_REGION is not set');
     this.bucket = bucket;
-    this.s3 = opts.client ?? new S3Client({ region });
+    this.s3 = opts.client ?? new S3Client({ region, requestChecksumCalculation: 'WHEN_REQUIRED' }) // no default CRC32 on parts;
   }
 
   async createMultipart(key: string): Promise<string> {
     const r = await this.s3.send(
-      new CreateMultipartUploadCommand({ Bucket: this.bucket, Key: key, ChecksumAlgorithm: 'SHA256' }),
+      new CreateMultipartUploadCommand({ Bucket: this.bucket, Key: key }),
     );
     if (!r.UploadId) throw new Error('S3 returned no UploadId');
     return r.UploadId;
@@ -45,7 +41,7 @@ export class S3ObjectStore implements ObjectStore {
   }
 
   async completeMultipart(key: string, uploadId: string): Promise<void> {
-    const parts: Array<{ PartNumber: number; ETag: string; ChecksumSHA256?: string }> = [];
+    const parts: Array<{ PartNumber: number; ETag: string }> = [];
     let marker: string | undefined;
     for (;;) {
       const r = await this.s3.send(
@@ -53,7 +49,7 @@ export class S3ObjectStore implements ObjectStore {
       );
       for (const p of r.Parts ?? []) {
         if (p.PartNumber !== undefined && p.ETag) {
-          parts.push({ PartNumber: p.PartNumber, ETag: p.ETag, ChecksumSHA256: p.ChecksumSHA256 });
+          parts.push({ PartNumber: p.PartNumber, ETag: p.ETag });
         }
       }
       if (!r.IsTruncated) break;
@@ -69,13 +65,15 @@ export class S3ObjectStore implements ObjectStore {
     );
   }
 
-  /** Hex sha256 of the whole object (object-level checksum). */
+  /**
+   * Hex sha256 of the whole object, computed by streaming it. S3 multipart checksums are
+   * composite (a hash of part hashes), so they can never equal a whole-file sha256.
+   */
   async sha256(key: string): Promise<string> {
-    const r = await this.s3.send(
-      new GetObjectAttributesCommand({ Bucket: this.bucket, Key: key, ObjectAttributes: ['Checksum'] }),
-    );
-    const b64 = r.Checksum?.ChecksumSHA256;
-    if (!b64) throw new Error(`no SHA-256 checksum on object ${key}`);
-    return base64ToHex(b64);
+    const r = await this.s3.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    if (!r.Body) throw new Error(`object ${key} has no body`);
+    const h = createHash('sha256');
+    for await (const chunk of r.Body as AsyncIterable<Uint8Array>) h.update(chunk);
+    return h.digest('hex');
   }
 }

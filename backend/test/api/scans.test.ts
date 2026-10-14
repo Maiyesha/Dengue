@@ -250,6 +250,8 @@ describe('POST /v1/scans', () => {
         device_attempts: [{ step: 'fingertip_ppg', attempt: 1, device_verdict: 'ACCEPT', reason_codes: [] }],
       }),
       scanBody({ captured_at: 'yesterday' }),
+      scanBody({ capture_steps: ['neutral_face'], device_attempts: [] }),
+      scanBody({ capture_steps: ['fingertip_ppg', 'ocular_capture'], device_attempts: [] }),
     ];
     for (const b of bad) {
       const r = await post('/v1/scans', b);
@@ -446,7 +448,7 @@ describe('GET /v1/scans/:id and POST /v1/scans/:id/recapture', () => {
     const narrow = await post('/v1/scans', scanBody({
       patient_id: P_OK2,
       captured_at: at(1700),
-      capture_steps: ['neutral_face'],
+      capture_steps: ['neutral_face', 'fingertip_ppg'],
       device_attempts: [{ step: 'neutral_face', attempt: 1, device_verdict: 'ACCEPT', reason_codes: [] }],
     }));
     expect(narrow.statusCode).toBe(201);

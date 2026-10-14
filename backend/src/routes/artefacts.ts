@@ -58,9 +58,8 @@ async function pseudonymOf(c: pg.PoolClient, scanId: string): Promise<string> {
 }
 
 /** True when every core step's latest attempt has verified video + roi_trace. */
-async function coreArtefactsVerified(c: pg.PoolClient, scanId: string, captureSteps?: string[]): Promise<boolean> {
-  const core = CORE_STEPS.filter((s) => !captureSteps || captureSteps.includes(s));
-  if (core.length === 0) return false;
+async function coreArtefactsVerified(c: pg.PoolClient, scanId: string): Promise<boolean> {
+  const core = CORE_STEPS;
   const r = await c.query<{ step: string; ok: boolean }>(
     `SELECT l.step::text AS step,
             (SELECT count(DISTINCT a.kind) FROM artefacts a
@@ -181,8 +180,8 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         if (!ref) throw notFound();
         // Lock the scan first (same order as declare) so final completes serialise.
         const s = (
-          await c.query<{ id: string; site_id: string; metadata: { capture_steps?: string[] } }>(
-            'SELECT id, site_id, metadata FROM scans WHERE id = $1 FOR UPDATE',
+          await c.query<{ id: string; site_id: string }>(
+            'SELECT id, site_id FROM scans WHERE id = $1 FOR UPDATE',
             [ref.scan_id],
           )
         ).rows[0];
@@ -217,7 +216,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         if (!verified) return { verified: false as const };
 
         let enqueue = false;
-        if (await coreArtefactsVerified(c, s.id, s.metadata?.capture_steps)) {
+        if (await coreArtefactsVerified(c, s.id)) {
           const u = await c.query(
             `UPDATE scans SET status = 'quality_pending' WHERE id = $1 AND status = 'capture_pending'`,
             [s.id],
@@ -252,7 +251,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           throw new ApiError(422, 'DS_QG_000', `Scan in status ${s.status} has not passed the quality gate`);
         }
         await audit(c, {
-          eventType: 'model_decision',
+          eventType: 'data_access',
           actorId: actor.id,
           actorRole: actorRole(actor),
           patientPseudonym: await pseudonymOf(c, s.id),

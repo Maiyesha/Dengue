@@ -176,6 +176,14 @@ describe('artefact uploads', () => {
     expect(await statusOf(scan)).toBe('quality_pending');
   });
 
+  it('face artefacts verified but fingertip not -> stays capture_pending, no enqueue', async () => {
+    const scan = await mkScan();
+    await upload(scan, 'neutral_face', 'video');
+    await upload(scan, 'neutral_face', 'roi_trace');
+    expect(await statusOf(scan)).toBe('capture_pending');
+    expect(ta.fakes.qualityQueue.enqueued.filter((x) => x === scan)).toHaveLength(0);
+  });
+
   it('only the latest attempt counts toward the quality trigger', async () => {
     const scan = await mkScan('capture_pending', [['neutral_face', 1], ['neutral_face', 2], ['fingertip_ppg', 1]]);
     await upload(scan, 'neutral_face', 'video', 1);
@@ -232,6 +240,11 @@ describe('POST /v1/scans/:id/features/extract', () => {
     const scan = await mkScan('quality_passed');
     const sys = await tokenFor('system_agent');
     expect((await post(`/v1/scans/${scan}/features/extract`, {}, { token: sys })).statusCode).toBe(202);
+    const au = (await pool.query(
+      `SELECT event_type, outcome FROM clinical_audit_log WHERE resource_id = $1 AND outcome = 'features:extract_requested'`,
+      [scan],
+    )).rows;
+    expect(au).toEqual([{ event_type: 'data_access', outcome: 'features:extract_requested' }]);
     expect((await post(`/v1/scans/${scan}/features/extract`, {})).statusCode).toBe(403);
     expect((await post(`/v1/scans/${scan}/features/extract`, {}, { token: await deviceTokenFor(randomUUID(), SITE_A) })).statusCode).toBe(403);
   });

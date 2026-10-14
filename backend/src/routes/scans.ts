@@ -69,7 +69,12 @@ const ScanBody = z
     captured_at: z.string().datetime({ offset: true }),
     offline: z.boolean(),
     protocol_version: z.string().min(1).max(64),
-    capture_steps: z.array(CaptureStep).min(1).max(4).refine(uniqueSteps, 'capture_steps must be unique'),
+    capture_steps: z
+      .array(CaptureStep)
+      .min(1)
+      .max(4)
+      .refine(uniqueSteps, 'capture_steps must be unique')
+      .refine((a) => [...CORE_STEPS].every((c) => a.includes(c as CaptureStepT)), 'capture_steps must include both core steps'),
     device_attempts: z.array(DeviceAttempt).max(12),
     metadata: CaptureMetadata,
   })
