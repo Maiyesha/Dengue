@@ -48,16 +48,16 @@ public enum ExperimentalPulsePresenter {
     /// Monitor value first; experimental values only when enabled. The notice is always the policy text.
     public static func present(_ r: ExperimentalResponse, monitorHR: Int?)
         -> (monitor: String?, experimental: [ExperimentalPulseView]) {
-        let monitor = monitorHR.map { String(format: NurseCopy.monitorFormat, $0) }
+        let monitor = monitorHR.map { NurseCopy.monitorLine($0) }
         guard r.enabled else { return (monitor, []) }
         let views: [ExperimentalPulseView] = r.items.compactMap { item in
             guard item.pulseRateBpm.isFinite, abs(item.pulseRateBpm) < 1000 else { return nil }
             let bpm = Int(item.pulseRateBpm.rounded())
-            let format = item.domain == .rppgFace
-                ? NurseCopy.cameraPulseFaceFormat : NurseCopy.cameraPulseFingertipFormat
-            return ExperimentalPulseView(label: NurseCopy.experimentalChip,
-                                         text: String(format: format, bpm),
-                                         notice: NurseCopy.experimentalNotice)
+            guard (20...300).contains(bpm) else { return nil }
+            return ExperimentalPulseView(
+                label: NurseCopy.experimentalChip,
+                text: NurseCopy.cameraPulseLine(fingertip: item.domain == .rppgFingertip, bpm: bpm),
+                notice: NurseCopy.experimentalNotice)
         }
         return (monitor, views)
     }

@@ -93,6 +93,7 @@ public final class CaptureSessionMachine {
         guard case .reviewingStep(let step, let attempt) = state else { return }
         switch v {
         case .accept:
+            lastReasons[step] = nil
             acceptedSteps.append(step)
             advance()
         case .recapture(let reasons):

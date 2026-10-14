@@ -14,7 +14,55 @@ final class CopyPolicyTests: XCTestCase {
         XCTAssertEqual(NurseCopy.forbiddenTerms(in: "This is SAFE"), ["safe"])
         XCTAssertEqual(NurseCopy.forbiddenTerms(in: "Detect  Dengue now"), ["detect dengue"])
         XCTAssertEqual(NurseCopy.forbiddenTerms(in: "Risk, result."), ["risk", "result"])
-        XCTAssertEqual(NurseCopy.forbiddenTerms(in: "Unsafe resulting normalise"), [])
+        XCTAssertEqual(NurseCopy.forbiddenTerms(in: "Unsafe safety riskless normalise"), [],
+                       "stems match whole words plus listed inflections only, not substrings")
+    }
+
+    func testLintCatchesInflections() {
+        let cases: [(String, String)] = [
+            ("Results saved", "results"), ("Two risks", "risks"), ("positives", "positives"),
+            ("diagnosed", "diagnosed"), ("diagnostic", "diagnostic"), ("diagnoses", "diagnoses"),
+            ("It was negatively", "negatively"), ("Severe", "severe"), ("normally", "normally"),
+            ("abnormal", "abnormal"), ("safely", "safely"), ("resulting", "resulting"),
+        ]
+        for (text, word) in cases {
+            XCTAssertEqual(NurseCopy.forbiddenTerms(in: text), [word], text)
+        }
+        for t in ["detects dengue", "Detected Dengue", "detecting dengue"] {
+            XCTAssertEqual(NurseCopy.forbiddenTerms(in: t), ["detect dengue"], t)
+        }
+        XCTAssertEqual(NurseCopy.forbiddenTerms(in: "detect the fever, dengue ward"), [])
+    }
+
+    func testRegulatoryCopyIsDistinct() {
+        XCTAssertEqual(ReasonCode.dsREG001.nurseInstruction, NurseCopy.consentBlocked)
+        XCTAssertEqual(ReasonCode.dsREG002.nurseInstruction,
+                       "Study consent needs renewing before recording. Contact the study coordinator.")
+        XCTAssertEqual(NurseCopy.regulatoryHold,
+                       "Recordings for this patient are on hold. Contact the study coordinator.")
+        XCTAssertNotEqual(ReasonCode.dsREG001.nurseInstruction, ReasonCode.dsREG002.nurseInstruction)
+        XCTAssertEqual(ReasonCode.dsQG005.nurseInstruction, NurseCopy.fingertipGuidance)
+        for s in [NurseCopy.holdStillPatient, NurseCopy.fingertipGuidance, NurseCopy.cameraNotReady,
+                  NurseCopy.showColourCard, NurseCopy.comeBackLater, NurseCopy.patientDeclined,
+                  NurseCopy.disinfectReminder, NurseCopy.phoneWarm, NurseCopy.consentRenewal,
+                  NurseCopy.regulatoryHold] {
+            XCTAssertTrue(NurseCopy.allStrings.contains(s), s)
+        }
+    }
+
+    func testInterpolatedHelpers() {
+        XCTAssertEqual(NurseCopy.recordStepAgain(2), "Please record step 2 again")
+        XCTAssertEqual(NurseCopy.repeatNotice(maskedStudyID: "••417", reason: "lighting"),
+                       "Recording for study ID ••417 needs repeating (lighting).")
+    }
+
+    func testImplausibleBpmDropped() {
+        let r = ExperimentalResponse(enabled: true, items: [
+            .init(domain: .rppgFace, pulseRateBpm: 0), .init(domain: .rppgFace, pulseRateBpm: -40),
+            .init(domain: .rppgFace, pulseRateBpm: 19.4), .init(domain: .rppgFace, pulseRateBpm: 301),
+            .init(domain: .rppgFingertip, pulseRateBpm: 20), .init(domain: .rppgFace, pulseRateBpm: 300)])
+        let out = ExperimentalPulsePresenter.present(r, monitorHR: nil).experimental.map { $0.text }
+        XCTAssertEqual(out, ["Camera pulse (fingertip): 20 bpm", "Camera pulse (face): 300 bpm"])
     }
 
     func testAllStringsContainsEveryDeclaredConstantAndInstruction() throws {

@@ -33,35 +33,46 @@ public enum NurseCopy {
     public static let reasonLighting = "Turn on overhead light / avoid light behind patient"
     public static let reasonFaceLost = "Keep the whole face in the oval"
     public static let reasonFrames = "Close other apps and try again"
-    public static let reasonFingerCoverage = "Cover the camera and light fully with the fingertip, then press gently"
     public static let reasonOtherQuality = "Please record this step again"
     public static let reasonPulseSignal = "Keep still for the full time; check lighting"
     public static let reasonSegmentation = "Ask patient to look up; show the colour card"
-    public static let reasonConsentInvalid = "Stop. Study consent is not valid. Contact the study coordinator."
-    public static let reasonRegulatoryHold = "Stop. Recordings for this patient are on hold. Notify the coordinator."
+    public static let consentRenewal = "Study consent needs renewing before recording. Contact the study coordinator."
+    public static let regulatoryHold = "Recordings for this patient are on hold. Contact the study coordinator."
+
+    // Additional nurse strings (spec 6.3, 6.4, 7.1-7.4, 11)
+    public static let holdStillPatient = "Ask the patient to rest still and not talk"
+    public static let fingertipGuidance = "Cover the camera and light completely with the fingertip. Rest the hand on the bed. Don't press hard."
+    public static let cameraNotReady = "Camera not ready — try again"
+    public static let showColourCard = "Show the colour card next to the eye/tongue"
+    public static let comeBackLater = "Come back later"
+    public static let patientDeclined = "Patient declined today"
+    public static let disinfectReminder = "Wipe the phone with the ward's approved disinfectant before the next patient."
+    public static let phoneWarm = "Phone is warm — wait a minute"
 
     // Quality screen (spec 8)
     public static let statusGood = "Good recording"
-    public static let statusRecordAgainFormat = "Please record step %d again"
+    public static let recordAgainLead = "Please record step"
+    public static let recordAgainTail = "again"
     public static let statusCouldNotRecord = "Could not record — reason saved"
     public static let stepPassed = "Passed"
     public static let stepRecordAgain = "Record again"
 
     // Errors and states (spec 11)
-    public static let thermalWarning = "Phone is warm — wait a minute"
     public static let cameraDenied = "The camera is needed to record. Open Settings to allow camera access."
     public static let lowStorage = "Storage is low. Let uploads finish to free space before recording."
     public static let lowBattery = "Battery is too low to record. Please charge the phone."
     public static let interrupted = "Recording was interrupted. This step will be repeated."
     public static let offlineQueued = "Will upload when connected"
     public static let recentScan = "This patient was recorded in the last 30 min"
-    public static let repeatNoticeFormat = "Recording for study ID %@ needs repeating (%@)."
+    public static let repeatNoticeLead = "Recording for study ID"
+    public static let repeatNoticeTail = "needs repeating"
 
     // Reference / experimental display
-    public static let monitorFormat = "Monitor pulse: %d bpm"
+    public static let monitorPrefix = "Monitor pulse"
     public static let experimentalChip = "EXPERIMENTAL"
-    public static let cameraPulseFaceFormat = "Camera pulse (face): %d bpm"
-    public static let cameraPulseFingertipFormat = "Camera pulse (fingertip): %d bpm"
+    public static let cameraPulseFacePrefix = "Camera pulse (face)"
+    public static let cameraPulseFingertipPrefix = "Camera pulse (fingertip)"
+    public static let bpmUnit = "bpm"
 
     public static let allCues: [GuidanceCue] = [
         .moveCloser, .moveBack, .centreFace, .tiltPhone, .tooDark, .lightBehind, .holdStill, .ready,
@@ -81,7 +92,18 @@ public enum NurseCopy {
     }
 
     public static func recordStepAgain(_ n: Int) -> String {
-        String(format: statusRecordAgainFormat, n)
+        "\(recordAgainLead) \(n) \(recordAgainTail)"
+    }
+
+    public static func monitorLine(_ bpm: Int) -> String { "\(monitorPrefix): \(bpm) \(bpmUnit)" }
+
+    public static func cameraPulseLine(fingertip: Bool, bpm: Int) -> String {
+        "\(fingertip ? cameraPulseFingertipPrefix : cameraPulseFacePrefix): \(bpm) \(bpmUnit)"
+    }
+
+    /// e.g. "Recording for study ID ••417 needs repeating (lighting)."
+    public static func repeatNotice(maskedStudyID: String, reason: String) -> String {
+        "\(repeatNoticeLead) \(maskedStudyID) \(repeatNoticeTail) (\(reason))."
     }
 
     /// The two strings exempt from the forbidden-word lint.
@@ -93,13 +115,15 @@ public enum NurseCopy {
             checklistResting, checklistGlasses, checklistLight, checklistHolder, checklistColourCard,
             cueMoveCloser, cueMoveBack, cueCentreFace, cueTiltPhone, cueTooDark, cueLightBehind,
             cueHoldStill, cueReady,
-            reasonMotion, reasonLighting, reasonFaceLost, reasonFrames, reasonFingerCoverage,
-            reasonOtherQuality, reasonPulseSignal, reasonSegmentation, reasonConsentInvalid,
-            reasonRegulatoryHold,
-            statusGood, statusRecordAgainFormat, statusCouldNotRecord, stepPassed, stepRecordAgain,
-            thermalWarning, cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
-            recentScan, repeatNoticeFormat,
-            monitorFormat, experimentalChip, cameraPulseFaceFormat, cameraPulseFingertipFormat,
+            reasonMotion, reasonLighting, reasonFaceLost, reasonFrames,
+            reasonOtherQuality, reasonPulseSignal, reasonSegmentation, consentRenewal,
+            regulatoryHold,
+            holdStillPatient, fingertipGuidance, cameraNotReady, showColourCard, comeBackLater,
+            patientDeclined, disinfectReminder, phoneWarm,
+            statusGood, recordAgainLead, recordAgainTail, statusCouldNotRecord, stepPassed, stepRecordAgain,
+            cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
+            recentScan, repeatNoticeLead, repeatNoticeTail,
+            monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,
         ]
         var all = constants
         for cue in allCues { all.append(text(for: cue)) }
@@ -109,22 +133,37 @@ public enum NurseCopy {
     }
 
     // MARK: Forbidden-word lint (spec 4)
+    //
+    // Rule: text is split into lowercase letter-only words. A word is forbidden when
+    //  - it starts with "diagnos" (diagnose, diagnosed, diagnoses, diagnosis, diagnostic), or
+    //  - it equals a listed stem plus an optional inflection suffix (s, es, ed, d, ing, ly,
+    //    ies), e.g. results, risks, positives, safely, abnormal.
+    // Stems match only a whole word plus those suffixes, never as a substring or arbitrary
+    // prefix: "unsafe", "safety", "riskless", "normalise" are NOT flagged.
+    // The phrase "detect dengue" also matches detects/detected/detecting dengue.
 
-    public static let forbiddenWords: [String] = [
-        "diagnose", "diagnosis", "positive", "negative", "severity", "safe", "normal",
-        "abnormal", "risk", "result",
+    public static let forbiddenStems: [String] = [
+        "result", "risk", "positive", "negative", "severity", "severe", "normal", "abnormal", "safe",
     ]
-    public static let forbiddenPhrases: [String] = ["detect dengue"]
+    public static let forbiddenPrefixes: [String] = ["diagnos"]
+    private static let inflections: [String] = ["", "s", "es", "ed", "d", "ing", "ly", "ies"]
+    private static let detectForms: Set<String> = ["detect", "detects", "detected", "detecting"]
 
-    /// Forbidden terms present in `s` (whole word, case-insensitive; phrases matched on word sequence).
+    /// Forbidden terms present in `s` (case-insensitive): the offending words, plus
+    /// "detect dengue" for the phrase.
     public static func forbiddenTerms(in s: String) -> [String] {
         let words = s.lowercased()
             .components(separatedBy: CharacterSet.letters.inverted)
             .filter { !$0.isEmpty }
         var found: [String] = []
-        for w in forbiddenWords where words.contains(w) { found.append(w) }
-        let joined = " " + words.joined(separator: " ") + " "
-        for p in forbiddenPhrases where joined.contains(" " + p + " ") { found.append(p) }
+        for w in words {
+            let hit = forbiddenPrefixes.contains { w.hasPrefix($0) }
+                || forbiddenStems.contains { stem in inflections.contains { w == stem + $0 } }
+            if hit, !found.contains(w) { found.append(w) }
+        }
+        for (a, b) in zip(words, words.dropFirst()) where detectForms.contains(a) && b == "dengue" {
+            if !found.contains("detect dengue") { found.append("detect dengue") }
+        }
         return found
     }
 }

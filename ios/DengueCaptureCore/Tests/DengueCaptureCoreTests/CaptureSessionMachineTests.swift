@@ -53,6 +53,22 @@ final class CaptureSessionMachineTests: XCTestCase {
         XCTAssertEqual(m.state, .completed(.acquisitionFailure))
     }
 
+    func testAcceptClearsLastReasons() {
+        let m = make()
+        record(m); m.verdict(.recapture([.dsQG001]))
+        XCTAssertEqual(m.lastReasons[.neutralFace], [.dsQG001])
+        record(m); m.verdict(.accept)
+        XCTAssertNil(m.lastReasons[.neutralFace])
+    }
+
+    func testUnableToAcquireOnFinalAttemptRecordsReasons() {
+        let m = make()
+        for _ in 0..<2 { record(m); m.verdict(.recapture([.dsQG002])) }
+        record(m); m.verdict(.recapture([.dsRPPG001]))
+        XCTAssertEqual(m.lastReasons[.neutralFace], [.dsRPPG001])
+        XCTAssertEqual(m.state, .positioning(.fingertipPPG))
+    }
+
     func testInterruptionDiscardsPartialWithoutConsumingAttempt() {
         let m = make()
         m.positioned()

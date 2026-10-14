@@ -19,12 +19,12 @@ public enum ReasonCode: String, Codable, CaseIterable, Equatable {
         case .dsQG002: return NurseCopy.reasonLighting
         case .dsQG003: return NurseCopy.reasonFaceLost
         case .dsQG004: return NurseCopy.reasonFrames
-        case .dsQG005: return NurseCopy.reasonFingerCoverage
+        case .dsQG005: return NurseCopy.fingertipGuidance
         case .dsQG099: return NurseCopy.reasonOtherQuality
         case .dsRPPG001, .dsRPPG002: return NurseCopy.reasonPulseSignal
         case .dsSEG001: return NurseCopy.reasonSegmentation
-        case .dsREG001: return NurseCopy.reasonConsentInvalid
-        case .dsREG002: return NurseCopy.reasonRegulatoryHold
+        case .dsREG001: return NurseCopy.consentBlocked
+        case .dsREG002: return NurseCopy.consentRenewal
         }
     }
 }
