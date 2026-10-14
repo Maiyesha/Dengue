@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
+import swagger from '@fastify/swagger';
 import { ZodError } from 'zod';
 import { ApiError } from './errors';
 import type { AppDeps } from './deps';
 import { idempotencyPlugin } from './idempotency';
+import { swaggerOptions } from './openapi';
 import { artefactRoutes } from './routes/artefacts';
 import { clinicalDataRoutes } from './routes/clinicalData';
 import { patientRoutes } from './routes/patients';
@@ -45,6 +47,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
+  // fastify-plugin (not encapsulated): must be registered before every route it documents.
+  app.register(swagger, swaggerOptions);
+  app.get('/openapi.json', { schema: { hide: true } }, async () => app.swagger());
+
   app.addHook('onRequest', async (req, reply) => {
     reply.header('X-Request-Id', req.id);
   });
@@ -68,7 +74,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     return reply.status(500).send(envelope(req, deps.now, 'DS_INTERNAL_001', 'Internal server error'));
   });
 
-  app.get('/health', async () => ({ status: 'alive' }));
+  // Registered as a plugin so it loads after swagger and is picked up by its onRoute hook.
+  app.register(async (i) => {
+    i.get('/health', async () => ({ status: 'alive' }));
+  });
 
   // Not encapsulated: its hooks must see every route registered after it.
   app.register(idempotencyPlugin);
