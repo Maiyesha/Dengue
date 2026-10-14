@@ -4,23 +4,32 @@
 -- Device routes run their DB work inside withRls() as app.roles = 'system_agent' with
 -- app.site_id = the caller's (or device's) site. Column-level grants are per Postgres role
 -- (app_api), not per app role, so:
---   * writes (INSERT/UPDATE) of attest_public_key / push_token are column-granted to app_api but
+--   * writes (INSERT of attest_public_key, UPDATE of assertion_counter / push_token) are column-granted to app_api but
 --     row-limited by policy to system_agent on its own app.site_id (writing does not disclose);
 --   * attest_public_key is never SELECT-granted to app_api; it is read through the SECURITY
 --     DEFINER function device_attest_public_key(), which returns NULL unless the caller is
 --     system_agent on the device's site. push_token stays unreadable by app_api entirely.
 
 -- ---------------------------------------------------------------- device_challenges
--- One row per issued challenge. Only sha256(challenge) is stored. Single use: consumed by DELETE.
--- Bound to the issuing user and site. TTL 5 minutes (expires_at); expired rows are swept on issue.
+-- One row per issued challenge. Only sha256(challenge) is stored. Single use: consumed by DELETE,
+-- which matches on purpose (and device_id for 'renew'). TTL 5 minutes (expires_at); expired rows
+-- are swept on issue.
+--   purpose 'attest': issued to an admin/clinician (issued_to = user id) for enrolment and the
+--                     user-authenticated assert; device_id NULL.
+--   purpose 'renew' : issued unauthenticated for one active device (device_id set,
+--                     issued_to = device id); usable only by an assert for that device.
 CREATE TABLE device_challenges (
   challenge_hash bytea       PRIMARY KEY CHECK (octet_length(challenge_hash) = 32),
+  purpose        text        NOT NULL CHECK (purpose IN ('attest','renew')),
+  device_id      uuid        REFERENCES devices(id) ON DELETE CASCADE,
   issued_to      text        NOT NULL,
   site_id        text        NOT NULL REFERENCES sites(id),
   created_at     timestamptz NOT NULL DEFAULT now(),
-  expires_at     timestamptz NOT NULL DEFAULT now() + interval '5 minutes'
+  expires_at     timestamptz NOT NULL DEFAULT now() + interval '5 minutes',
+  CHECK ((purpose = 'renew') = (device_id IS NOT NULL))
 );
 CREATE INDEX device_challenges_expires_idx ON device_challenges (expires_at);
+CREATE INDEX device_challenges_device_idx ON device_challenges (device_id) WHERE device_id IS NOT NULL;
 ALTER TABLE device_challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE device_challenges FORCE  ROW LEVEL SECURITY;
 GRANT SELECT, INSERT, DELETE ON device_challenges TO app_api;
@@ -28,9 +37,11 @@ CREATE POLICY device_challenges_system ON device_challenges FOR ALL TO app_api
   USING      (app_has_role('system_agent') AND site_id = app_site_id())
   WITH CHECK (app_has_role('system_agent') AND site_id = app_site_id());
 
--- ---------------------------------------------------------------- devices: system_agent writes
+-- ---------------------------------------------------------------- devices: system_agent writes (no status)
 GRANT INSERT (site_id, ward_id, app_attest_key_id, attest_public_key) ON devices TO app_api;
-GRANT UPDATE (assertion_counter, push_token, status) ON devices TO app_api;
+-- status is deliberately NOT granted: there is no revoke route yet, and without the grant no app
+-- session can revoke or (worse) un-revoke a device. Add it together with a revoke route.
+GRANT UPDATE (assertion_counter, push_token) ON devices TO app_api;
 CREATE POLICY devices_insert_system ON devices FOR INSERT TO app_api
   WITH CHECK (app_has_role('system_agent') AND site_id = app_site_id());
 CREATE POLICY devices_update_system ON devices FOR UPDATE TO app_api

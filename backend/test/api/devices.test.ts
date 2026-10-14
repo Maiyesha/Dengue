@@ -317,3 +317,110 @@ describe('POST /v1/devices/push-token', () => {
     expect(r.json().error.code).toBe('DS_DEVICE_001');
   });
 });
+
+describe('idempotency storage of /assert', () => {
+  it('a successful assert leaves no device token in idempotency_keys', async () => {
+    const id = await enrol();
+    const r = await assertDevice(id, 1);
+    expect(r.statusCode).toBe(200);
+    const tok = r.json().device_token;
+    const n = (await pool.query(
+      `SELECT count(*)::int AS n FROM idempotency_keys
+        WHERE response::text LIKE '%device_token%' OR strpos(coalesce(response::text, ''), $1) > 0`, [tok])).rows[0].n;
+    expect(n).toBe(0);
+  });
+});
+
+describe('device token renewal (no user token)', () => {
+  const renewalChallenge = (deviceId: string) =>
+    app.inject({ method: 'POST', url: `/v1/devices/${deviceId}/renewal-challenge`, payload: {} });
+  const anonAssert = (deviceId: string, counter: number, ch: string) =>
+    app.inject({ method: 'POST', url: '/v1/devices/assert', payload: { device_id: deviceId, assertion: b64(String(counter)), challenge: ch } });
+  const renewRows = async (deviceId: string) =>
+    (await pool.query(
+      `SELECT purpose, device_id, extract(epoch FROM expires_at - created_at)::int AS ttl
+         FROM device_challenges WHERE device_id = $1`, [deviceId])).rows;
+
+  it('unauthenticated renewal-challenge then assert issues a token; audited with the device as actor', async () => {
+    const id = await enrol();
+    const c = await renewalChallenge(id);
+    expect(c.statusCode).toBe(200);
+    expect(Buffer.from(c.json().challenge, 'base64').length).toBe(32);
+    expect(await renewRows(id)).toEqual([{ purpose: 'renew', device_id: id, ttl: 300 }]);
+    const r = await anonAssert(id, 1, c.json().challenge);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().expires_in).toBe(86400);
+    expect(await t.deps.deviceTokenSigner.verify(r.json().device_token)).toEqual({ device_id: id, site_id: SITE_A });
+    expect((await deviceRow(id)).counter).toBe(1);
+    const a = (await pool.query(
+      `SELECT event_type, actor_role, actor_id_hash, patient_pseudonym FROM clinical_audit_log
+        WHERE resource_type = 'device' AND resource_id = $1 AND outcome = 'device:renewed'`, [id])).rows;
+    expect(a).toEqual([{ event_type: 'device_event', actor_role: 'device',
+      actor_id_hash: createHash('sha256').update(id).digest('hex'), patient_pseudonym: 'n/a' }]);
+    // single use
+    expect((await anonAssert(id, 2, c.json().challenge)).json().error.code).toBe('DS_DEVICE_003');
+  });
+
+  it('a renew challenge for device A cannot be used for device B', async () => {
+    const a = await enrol();
+    const b = await enrol();
+    const ch = (await renewalChallenge(a)).json().challenge;
+    const r = await anonAssert(b, 1, ch);
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error.code).toBe('DS_DEVICE_003');
+    expect((await deviceRow(b)).counter).toBe(0);
+  });
+
+  it('revoked or unknown device → 404 DS_NOT_FOUND on renewal-challenge', async () => {
+    const id = await enrol();
+    await pool.query(`UPDATE devices SET status = 'revoked' WHERE id = $1`, [id]);
+    for (const d of [id, randomUUID()]) {
+      const r = await renewalChallenge(d);
+      expect(r.statusCode).toBe(404);
+      expect(r.json().error.code).toBe('DS_NOT_FOUND');
+    }
+    expect(await renewRows(id)).toEqual([]);
+  });
+
+  it('more than 5 outstanding renew challenges per device → 429 DS_RATE_001', async () => {
+    const id = await enrol();
+    for (let i = 0; i < 5; i++) expect((await renewalChallenge(id)).statusCode).toBe(200);
+    const r = await renewalChallenge(id);
+    expect(r.statusCode).toBe(429);
+    expect(r.json().error.code).toBe('DS_RATE_001');
+    // expired ones do not count
+    await pool.query(`UPDATE device_challenges SET expires_at = now() - interval '1 second' WHERE device_id = $1`, [id]);
+    expect((await renewalChallenge(id)).statusCode).toBe(200);
+  });
+
+  it('attest-purpose challenge cannot be used for renew, and a renew challenge cannot be used to attest or user-assert', async () => {
+    const id = await enrol();
+    const userCh = await challenge();
+    expect((await anonAssert(id, 1, userCh)).json().error.code).toBe('DS_DEVICE_003');
+    const renewCh = (await renewalChallenge(id)).json().challenge;
+    expect((await attest({ ch: renewCh })).json().error.code).toBe('DS_DEVICE_003');
+    const renewCh2 = (await renewalChallenge(id)).json().challenge;
+    const viaUser = await post('/v1/devices/assert', { device_id: id, assertion: b64('1'), challenge: renewCh2 });
+    expect(viaUser.json().error.code).toBe('DS_DEVICE_003');
+    expect((await deviceRow(id)).counter).toBe(0);
+  });
+
+  it('renewal with a replayed counter → 401 DS_DEVICE_002; invalid bearer on assert → 401 (no silent fallback)', async () => {
+    const id = await enrol();
+    expect((await anonAssert(id, 4, (await renewalChallenge(id)).json().challenge)).statusCode).toBe(200);
+    const r = await anonAssert(id, 4, (await renewalChallenge(id)).json().challenge);
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error.code).toBe('DS_DEVICE_002');
+    const bad = await app.inject({ method: 'POST', url: '/v1/devices/assert', headers: { authorization: 'Bearer junk' },
+      payload: { device_id: id, assertion: b64('5'), challenge: (await renewalChallenge(id)).json().challenge } });
+    expect(bad.statusCode).toBe(401);
+    expect(bad.json().error.code).toBe('DS_AUTH_001');
+  });
+
+  it('nurse token on assert → 403 (enrolment-side user flow stays admin/clinician)', async () => {
+    const id = await enrol();
+    const r = await post('/v1/devices/assert', { device_id: id, assertion: b64('1'), challenge: randomBytes(32).toString('base64') },
+      await tokenFor('nurse_operator', SITE_A));
+    expect(r.statusCode).toBe(403);
+  });
+});

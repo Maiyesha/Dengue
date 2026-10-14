@@ -43,13 +43,13 @@ const asSystem = <T>(siteId: string, fn: (c: pg.PoolClient) => Promise<T>) =>
 describe('device_challenges', () => {
   it('system_agent may insert/select/delete only on its own site', async () => {
     await asSystem(SITE_A, async (c) => {
-      await c.query(`INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ($1,'u',$2)`, [HASH, SITE_A]);
+      await c.query(`INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ($1,'attest','u',$2)`, [HASH, SITE_A]);
       expect((await c.query('SELECT 1 FROM device_challenges WHERE challenge_hash=$1', [HASH])).rowCount).toBe(1);
-      await fails(c, `INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ($1,'u',$2)`, [Buffer.alloc(32, 8), SITE_B], '42501');
+      await fails(c, `INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ($1,'attest','u',$2)`, [Buffer.alloc(32, 8), SITE_B], '42501');
       expect((await c.query('DELETE FROM device_challenges WHERE challenge_hash=$1', [HASH])).rowCount).toBe(1);
     });
     await asSystem(SITE_B, async (c) => {
-      await asSuper(c, `INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ($1,'u',$2)`, [HASH, SITE_A]);
+      await asSuper(c, `INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ($1,'attest','u',$2)`, [HASH, SITE_A]);
       expect((await c.query('SELECT 1 FROM device_challenges')).rowCount).toBe(0);
       expect((await c.query('DELETE FROM device_challenges WHERE challenge_hash=$1', [HASH])).rowCount).toBe(0);
     });
@@ -58,16 +58,30 @@ describe('device_challenges', () => {
   it('site roles (admin, clinician) cannot see or write challenges directly', async () => {
     for (const role of ['admin', 'clinician'] as Role[]) {
       await as(role, SITE_A, async (c) => {
-        await asSuper(c, `INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ($1,'u',$2)`, [HASH, SITE_A]);
+        await asSuper(c, `INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ($1,'attest','u',$2)`, [HASH, SITE_A]);
         expect((await c.query('SELECT 1 FROM device_challenges')).rowCount).toBe(0);
-        await fails(c, `INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ($1,'u',$2)`, [Buffer.alloc(32, 9), SITE_A], '42501');
+        await fails(c, `INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ($1,'attest','u',$2)`, [Buffer.alloc(32, 9), SITE_A], '42501');
       });
     }
   });
 
   it('challenge_hash must be 32 bytes', async () => {
     await asSystem(SITE_A, async (c) => {
-      await fails(c, `INSERT INTO device_challenges(challenge_hash, issued_to, site_id) VALUES ('\\x01','u',$1)`, [SITE_A], '23514');
+      await fails(c, `INSERT INTO device_challenges(challenge_hash, purpose, issued_to, site_id) VALUES ('\\x01','attest','u',$1)`, [SITE_A], '23514');
+    });
+  });
+});
+
+describe('device_challenges purpose / device_id', () => {
+  it('attest challenges have no device_id; renew challenges must name one; purpose is attest|renew', async () => {
+    await asSystem(SITE_A, async (c) => {
+      await seed(c);
+      const ins = `INSERT INTO device_challenges(challenge_hash, purpose, device_id, issued_to, site_id) VALUES ($1,$2,$3,'u',$4)`;
+      await c.query(ins, [Buffer.alloc(32, 1), 'renew', DEV_A, SITE_A]);
+      await c.query(ins, [Buffer.alloc(32, 2), 'attest', null, SITE_A]);
+      await fails(c, ins, [Buffer.alloc(32, 3), 'renew', null, SITE_A], '23514');
+      await fails(c, ins, [Buffer.alloc(32, 4), 'attest', DEV_A, SITE_A], '23514');
+      await fails(c, ins, [Buffer.alloc(32, 5), 'other', null, SITE_A], '23514');
     });
   });
 });
@@ -85,7 +99,7 @@ describe('devices writes', () => {
     });
   });
 
-  it('system_agent updates counter/push_token/status on its own site only; site roles update nothing', async () => {
+  it('system_agent updates counter/push_token on its own site only; site roles update nothing', async () => {
     await asSystem(SITE_B, async (c) => {
       await seed(c);
       expect((await c.query(`UPDATE devices SET assertion_counter = 9 WHERE id = $1`, [DEV_A])).rowCount).toBe(0);
@@ -93,7 +107,8 @@ describe('devices writes', () => {
     for (const role of ['admin', 'clinician', 'nurse_operator'] as Role[]) {
       await as(role, SITE_A, async (c) => {
         await seed(c);
-        expect((await c.query(`UPDATE devices SET status = 'revoked' WHERE id = $1`, [DEV_A])).rowCount).toBe(0);
+        expect((await c.query(`UPDATE devices SET assertion_counter = 9 WHERE id = $1`, [DEV_A])).rowCount).toBe(0);
+        await fails(c, `UPDATE devices SET status = 'revoked' WHERE id = $1`, [DEV_A], '42501');
       });
     }
     await asSystem(SITE_A, async (c) => {
@@ -102,6 +117,9 @@ describe('devices writes', () => {
       // identity columns are not UPDATE-granted
       await fails(c, `UPDATE devices SET attest_public_key = '\\x09' WHERE id = $1`, [DEV_A], '42501');
       await fails(c, `UPDATE devices SET site_id = $2 WHERE id = $1`, [DEV_A, SITE_B], '42501');
+      // status is not UPDATE-granted until a revoke route exists (no un-revoke possible)
+      await fails(c, `UPDATE devices SET status = 'revoked' WHERE id = $1`, [DEV_A], '42501');
+      await fails(c, `UPDATE devices SET status = 'active' WHERE id = $1`, [DEV_A], '42501');
       // push_token stays unreadable even for system_agent
       await fails(c, `SELECT push_token FROM devices WHERE id = $1`, [DEV_A], '42501');
     });
@@ -134,7 +152,8 @@ describe('device role on devices', () => {
     await asRole(pool, { userId: DEV_A, roles: ['device'], siteId: SITE_A }, async (c) => {
       await seed(c);
       expect((await c.query('SELECT id FROM devices WHERE id IN ($1,$2)', [DEV_A, DEV_A2])).rows).toEqual([{ id: DEV_A }]);
-      expect((await c.query(`UPDATE devices SET status='active' WHERE id = $1`, [DEV_A])).rowCount).toBe(0);
+      expect((await c.query(`UPDATE devices SET assertion_counter = 99 WHERE id = $1`, [DEV_A])).rowCount).toBe(0);
+      await fails(c, `UPDATE devices SET status='active' WHERE id = $1`, [DEV_A], '42501');
     });
     await asRole(pool, { userId: DEV_A, roles: ['device'], siteId: SITE_B }, async (c) => {
       await seed(c);
