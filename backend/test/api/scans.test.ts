@@ -337,7 +337,8 @@ describe('GET /v1/scans/:id and POST /v1/scans/:id/recapture', () => {
     const r = await getScan(id, await deviceTokenFor(randomUUID(), SITE_A));
     expect(r.statusCode).toBe(200);
     expect(r.json().scan.id).toBe(id);
-    // NOTE: steps are [] for a device today — RLS (0005) gives `device` no SELECT on scan_step_attempts.
+    expect(r.json().scan.steps).toHaveLength(4);
+    expect(r.json().scan.recaptures_remaining).toEqual({ neutral_face: 2, fingertip_ppg: 2, ocular_capture: 2, dorsal_tongue: 2 });
     expect((await getScan(id, await deviceTokenFor(randomUUID(), SITE_B))).statusCode).toBe(404);
   });
 
@@ -352,7 +353,7 @@ describe('GET /v1/scans/:id and POST /v1/scans/:id/recapture', () => {
     const r3 = await recapture(id, ['fingertip_ppg']);
     expect(r3.statusCode).toBe(422);
     expect(r3.json().error.code).toBe('DS_QG_099');
-    expect(r3.json().error.detail).toMatchObject({ unable_to_acquire: ['fingertip_ppg'], status: 'acquisition_failure' });
+    expect(r3.json().error.detail).toEqual({ unable_to_acquire: ['fingertip_ppg'], recaptured: [], status: 'acquisition_failure' });
     const g = (await getScan(id)).json().scan;
     expect(g.status).toBe('acquisition_failure');
     expect(g.steps.filter((s: { step: string }) => s.step === 'fingertip_ppg').map((s: { attempt: number }) => s.attempt)).toEqual([1, 2, 3]);
@@ -368,6 +369,48 @@ describe('GET /v1/scans/:id and POST /v1/scans/:id/recapture', () => {
     expect(r.statusCode).toBe(422);
     expect(r.json().error.code).toBe('DS_QG_099');
     expect((await getScan(id)).json().scan.status).toBe('capture_pending');
+  });
+
+  it('optional step exhausted + recapturable step → 422, other step still recaptured, status unchanged', async () => {
+    const id = await newScan(1350);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(200);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(200);
+    const r = await recapture(id, ['dorsal_tongue', 'ocular_capture']);
+    expect(r.statusCode).toBe(422);
+    expect(r.json().error.code).toBe('DS_QG_099');
+    expect(r.json().error.detail).toEqual({ unable_to_acquire: ['dorsal_tongue'], recaptured: ['ocular_capture'], status: 'capture_pending' });
+    const g = (await getScan(id)).json().scan;
+    expect(g.status).toBe('capture_pending');
+    const by = (step: string) => g.steps.filter((x: { step: string }) => x.step === step).map((x: { attempt: number }) => x.attempt);
+    expect(by('ocular_capture')).toEqual([1, 2]);
+    expect(by('dorsal_tongue')).toEqual([1, 2, 3]);
+    expect(g.recaptures_remaining).toMatchObject({ ocular_capture: 1, dorsal_tongue: 0 });
+  });
+
+  it('core step exhausted from quality_failed → acquisition_failure, no other attempts added', async () => {
+    const id = await newScan(1800);
+    expect((await recapture(id, ['neutral_face'])).statusCode).toBe(200);
+    expect((await recapture(id, ['neutral_face'])).statusCode).toBe(200);
+    await pool.query(`UPDATE scans SET status='quality_pending' WHERE id=$1`, [id]);
+    await pool.query(`UPDATE scans SET status='quality_failed' WHERE id=$1`, [id]);
+    const r = await recapture(id, ['neutral_face', 'ocular_capture']);
+    expect(r.statusCode).toBe(422);
+    expect(r.json().error.detail).toEqual({ unable_to_acquire: ['neutral_face'], recaptured: [], status: 'acquisition_failure' });
+    const g = (await getScan(id)).json().scan;
+    expect(g.status).toBe('acquisition_failure');
+    expect(g.steps.filter((x: { step: string }) => x.step === 'ocular_capture')).toHaveLength(1);
+  });
+
+  it('repeating an already-recorded failure writes no extra audit row', async () => {
+    const id = await newScan(1850);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(200);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(200);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(422);
+    const n = async () =>
+      Number((await pool.query(`SELECT count(*) FROM clinical_audit_log WHERE resource_id=$1 AND outcome='DS_QG_099'`, [id])).rows[0].count);
+    expect(await n()).toBe(1);
+    expect((await recapture(id, ['dorsal_tongue'])).statusCode).toBe(422);
+    expect(await n()).toBe(1);
   });
 
   it('recapture only ocular step leaves face attempts unchanged', async () => {

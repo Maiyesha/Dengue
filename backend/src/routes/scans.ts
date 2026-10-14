@@ -131,7 +131,7 @@ type CreateOutcome =
 
 type RecaptureOutcome =
   | { kind: 'ok'; view: Awaited<ReturnType<typeof scanView>> }
-  | { kind: 'exhausted'; steps: CaptureStepT[]; status: string };
+  | { kind: 'exhausted'; steps: CaptureStepT[]; recaptured: CaptureStepT[]; status: string };
 
 export async function scanRoutes(app: FastifyInstance): Promise<void> {
   const r = app.withTypeProvider<ZodTypeProvider>();
@@ -327,29 +327,39 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
           });
 
         const exhausted = steps.filter((x) => (highest.get(x) ?? 0) >= MAX_ATTEMPTS);
-        if (exhausted.length) {
-          const unable = [...new Set([...(s.metadata.unable_to_acquire ?? []), ...exhausted])];
-          const status = exhausted.some((x) => CORE_STEPS.has(x)) ? 'acquisition_failure' : s.status;
+        const coreFailed = exhausted.some((x) => CORE_STEPS.has(x));
+        // A core step out of attempts ends the capture: nothing else is recaptured.
+        const recaptured = coreFailed ? [] : steps.filter((x) => !exhausted.includes(x));
+
+        const priorUnable = s.metadata.unable_to_acquire ?? [];
+        const unable = [...new Set([...priorUnable, ...exhausted])];
+        const unableChanged = unable.length !== priorUnable.length;
+        const status = coreFailed ? 'acquisition_failure' : recaptured.length ? 'capture_pending' : s.status;
+        const statusChanged = status !== s.status;
+
+        if (unableChanged || statusChanged) {
           await c.query(
-            `UPDATE scans SET metadata = jsonb_set(metadata, '{unable_to_acquire}', $2::jsonb), status = $3::scan_status
+            `UPDATE scans
+                SET metadata = CASE WHEN $2 THEN jsonb_set(metadata, '{unable_to_acquire}', $3::jsonb) ELSE metadata END,
+                    status = $4::scan_status
               WHERE id = $1`,
-            [s.id, JSON.stringify(unable), status],
+            [s.id, unableChanged, JSON.stringify(unable), status],
           );
-          await auditRow('DS_QG_099');
-          return { kind: 'exhausted', steps: exhausted, status };
+        }
+        if (recaptured.length) {
+          await c.query(
+            `INSERT INTO scan_step_attempts (scan_id, step, attempt, device_verdict, reason_codes)
+             SELECT $1, t.step, t.attempt, 'RECAPTURE', ARRAY[$4::text]
+               FROM unnest($2::capture_step[], $3::smallint[]) AS t(step, attempt)`,
+            [s.id, recaptured, recaptured.map((x) => (highest.get(x) ?? 0) + 1), trigger_reason_code],
+          );
         }
 
-        let status = s.status;
-        if (status === 'quality_failed') {
-          await c.query(`UPDATE scans SET status = 'capture_pending' WHERE id = $1`, [s.id]);
-          status = 'capture_pending';
+        if (exhausted.length) {
+          // One audit row per call, and none when the call changed nothing (repeat of a known failure).
+          if (unableChanged || statusChanged || recaptured.length) await auditRow('DS_QG_099');
+          return { kind: 'exhausted', steps: exhausted, recaptured, status };
         }
-        await c.query(
-          `INSERT INTO scan_step_attempts (scan_id, step, attempt, device_verdict, reason_codes)
-           SELECT $1, t.step, t.attempt, 'RECAPTURE', ARRAY[$4::text]
-             FROM unnest($2::capture_step[], $3::smallint[]) AS t(step, attempt)`,
-          [s.id, steps, steps.map((x) => (highest.get(x) ?? 0) + 1), trigger_reason_code],
-        );
         await auditRow('scan:recapture');
         return { kind: 'ok', view: await scanView(c, s.id, status, s.metadata) };
       });
@@ -357,6 +367,7 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
       if (out.kind === 'exhausted') {
         throw new ApiError(422, 'DS_QG_099', 'Maximum recaptures reached; step marked UNABLE_TO_ACQUIRE', {
           unable_to_acquire: out.steps,
+          recaptured: out.recaptured,
           status: out.status,
         });
       }
