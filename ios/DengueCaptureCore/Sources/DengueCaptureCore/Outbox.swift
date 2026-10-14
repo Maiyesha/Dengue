@@ -6,6 +6,8 @@ public enum OutboxAction: Equatable {
     /// Caller must run `quarantine(sessionId:keys:sealedPaths:)` with its KeyStore.
     case quarantineRequired(sessionId: UUID)
     case failed
+    /// The item is frozen (quarantined, quarantinePending, needsRepeat, or finished); nothing changed.
+    case ignoredFrozen
 }
 
 public final class Outbox {
@@ -60,6 +62,14 @@ public final class Outbox {
     /// Statuses a late callback must not revive.
     private static func isFrozen(_ s: OutboxItem.Status) -> Bool {
         s == .quarantined || s == .failed || s == .needsRepeat || s == .quarantinePending
+    }
+
+    /// Sessions with interrupted quarantines (quarantinePending items); the app finishes them on launch.
+    public func pendingQuarantineSessions() throws -> [UUID] {
+        lock.lock(); defer { lock.unlock() }
+        var seen = Set<UUID>()
+        return try store.loadAll().filter { $0.status == .quarantinePending }
+            .map { $0.sessionId }.filter { seen.insert($0).inserted }
     }
 
     public func markInFlight(_ id: UUID) throws {
@@ -122,6 +132,7 @@ public final class Outbox {
         guard let it = try item(id) else { return .failed }
         switch e {
         case .retryable:
+            if Outbox.isFrozen(it.status) { return .ignoredFrozen }
             try markRetry(id)
             return .retryScheduled
         case .needsRepeat(let reasons):
@@ -149,6 +160,11 @@ public final class Outbox {
     }
 
     private func fail(_ id: UUID, _ reason: String) throws -> OutboxAction {
+        guard let it = try item(id) else { return .failed }
+        switch it.status {
+        case .quarantined, .quarantinePending, .needsRepeat, .done: return .ignoredFrozen
+        default: break
+        }
         try mutate(id) { $0.status = .failed; $0.failureReason = reason }
         try cascadeFailure(from: id)
         return .failed
@@ -165,7 +181,7 @@ public final class Outbox {
                 guard let dep = it.dependsOn, failed.contains(dep), !failed.contains(it.id) else { continue }
                 failed.insert(it.id)
                 changed = true
-                if it.status != .done && it.status != .quarantined {
+                if it.status != .done && it.status != .quarantined && it.status != .quarantinePending {
                     it.status = .failed
                     it.failureReason = "dependency failed"
                     try store.upsert(it)

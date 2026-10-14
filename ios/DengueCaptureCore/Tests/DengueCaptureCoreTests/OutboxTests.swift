@@ -132,12 +132,14 @@ final class OutboxTests: XCTestCase {
         XCTAssertEqual(try ob.item(a.id)?.attempts, 1)
         XCTAssertEqual(try ob.apply(.stopAndQuarantine(code: "DS_REG_001"), to: a.id),
                        .quarantineRequired(sessionId: s))
-        XCTAssertEqual(try ob.apply(.uploadHashMismatch, to: a.id), .failed)
-        XCTAssertEqual(try ob.item(a.id)?.status, .failed)
+        let b = try ob.enqueue(.createScan, sessionId: UUID(), payload: Data(), dependsOn: nil)
+        XCTAssertEqual(try ob.apply(.uploadHashMismatch, to: b.id), .failed)
+        XCTAssertEqual(try ob.item(b.id)?.status, .failed)
         for e in [APIError.duplicateRecent, .unauthorized, .reEnrol, .invalid(code: "DS_VALIDATION_001")] {
-            XCTAssertEqual(try ob.apply(e, to: a.id), .failed)
-            XCTAssertEqual(try ob.item(a.id)?.status, .failed)
-            XCTAssertNotNil(try ob.item(a.id)?.failureReason)
+            let x = try ob.enqueue(.createScan, sessionId: UUID(), payload: Data(), dependsOn: nil)
+            XCTAssertEqual(try ob.apply(e, to: x.id), .failed)
+            XCTAssertEqual(try ob.item(x.id)?.status, .failed)
+            XCTAssertNotNil(try ob.item(x.id)?.failureReason)
         }
     }
 }

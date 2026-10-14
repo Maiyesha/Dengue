@@ -73,4 +73,48 @@ final class OutboxGuardTests: XCTestCase {
         XCTAssertEqual(try ob.item(a.id)?.status, .quarantined)
         XCTAssertEqual(try ob.item(b.id)?.status, .quarantined)
     }
+
+    func testFailDoesNotOverwriteFrozenAndCascadeSkipsQuarantinePending() throws {
+        let ob = try make()
+        let s = UUID()
+        let a = try ob.enqueue(.createScan, sessionId: s, payload: Data(), dependsOn: nil)
+        let d = try ob.enqueue(.uploadArtefact, sessionId: s, payload: Data(), dependsOn: a.id)
+        try ob.apply(.stopAndQuarantine(code: "DS_REG_001"), to: a.id)
+        for e in [APIError.invalid(code: "X"), .unauthorized, .reEnrol] {
+            XCTAssertEqual(try ob.apply(e, to: a.id), .ignoredFrozen)
+            XCTAssertEqual(try ob.item(a.id)?.status, .quarantinePending)
+        }
+        // A failing item elsewhere whose dependent is quarantinePending is not touched by the cascade.
+        let root = try ob.enqueue(.createScan, sessionId: UUID(), payload: Data(), dependsOn: nil)
+        let dep = try ob.enqueue(.uploadArtefact, sessionId: s, payload: Data(), dependsOn: root.id)
+        try ob.apply(.stopAndQuarantine(code: "DS_REG_001"), to: dep.id)
+        XCTAssertEqual(try ob.item(dep.id)?.status, .quarantinePending)
+        try ob.apply(.invalid(code: "X"), to: root.id)
+        XCTAssertEqual(try ob.item(root.id)?.status, .failed)
+        XCTAssertEqual(try ob.item(dep.id)?.status, .quarantinePending)
+        XCTAssertEqual(try ob.item(d.id)?.status, .quarantinePending)
+    }
+
+    func testRetryableOnFrozenItemIsIgnored() throws {
+        let ob = try make()
+        let s = UUID()
+        let a = try ob.enqueue(.createScan, sessionId: s, payload: Data(), dependsOn: nil)
+        try ob.quarantine(sessionId: s, keys: InMemoryKeyStore(), sealedPaths: [])
+        XCTAssertEqual(try ob.apply(.retryable, to: a.id), .ignoredFrozen)
+        XCTAssertEqual(try ob.item(a.id)?.status, .quarantined)
+        XCTAssertEqual(try ob.item(a.id)?.attempts, 0)
+    }
+
+    func testPendingQuarantineSessionsSurvivesReopen() throws {
+        let ob = try make()
+        let s1 = UUID(), s2 = UUID()
+        let a = try ob.enqueue(.createScan, sessionId: s1, payload: Data(), dependsOn: nil)
+        _ = try ob.enqueue(.clinicalData, sessionId: s1, payload: Data(), dependsOn: nil)
+        _ = try ob.enqueue(.createScan, sessionId: s2, payload: Data(), dependsOn: nil)
+        try ob.apply(.stopAndQuarantine(code: "DS_REG_001"), to: a.id)
+        let reopened = try make()
+        XCTAssertEqual(try reopened.pendingQuarantineSessions(), [s1])
+        try reopened.quarantine(sessionId: s1, keys: InMemoryKeyStore(), sealedPaths: [])
+        XCTAssertEqual(try reopened.pendingQuarantineSessions(), [])
+    }
 }
