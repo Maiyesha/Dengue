@@ -45,6 +45,8 @@ public struct Preflight: Equatable {
 
 public final class CaptureSessionMachine {
     public private(set) var state: SessionState
+    /// Latest recapture / unable-to-acquire reasons per step (for the quality screen).
+    public private(set) var lastReasons: [CaptureStep: [ReasonCode]] = [:]
 
     private let captureProtocol: CaptureProtocol
     private var index = 0
@@ -94,12 +96,14 @@ public final class CaptureSessionMachine {
             acceptedSteps.append(step)
             advance()
         case .recapture(let reasons):
+            lastReasons[step] = reasons
             if attempt <= captureProtocol.maxRecapturesPerStep {
                 state = .positioning(step)
             } else {
                 verdict(.unableToAcquire(reasons))
             }
-        case .unableToAcquire:
+        case .unableToAcquire(let reasons):
+            lastReasons[step] = reasons
             failedSteps.append(step)
             advance()
         }

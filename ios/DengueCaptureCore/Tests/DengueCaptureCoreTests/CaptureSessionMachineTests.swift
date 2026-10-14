@@ -22,6 +22,7 @@ final class CaptureSessionMachineTests: XCTestCase {
         record(m, duration: 10)
         XCTAssertEqual(m.state, .positioning(.neutralFace))
         XCTAssertEqual(m.attempts(for: .neutralFace), 1)
+        XCTAssertEqual(m.lastReasons[.neutralFace], [.dsQG004])
     }
 
     func testShortRecordingOnLastAttemptYieldsUnableToAcquire() {
