@@ -3,13 +3,20 @@
 // User access tokens: RS256, issuer = deps.jwtIssuer, <= 15 min old, claims
 //   sub (= app_users.id), roles (non-empty array of user roles), site_id?, deidentify?, jti.
 // Device tokens: verified by deps.deviceTokenSigner (aud "device-upload"); actor roles ['device'].
+//   The verifier is chosen by the token's UNVERIFIED `aud` (decodeJwt): aud contains
+//   "device-upload" -> device verifier only; otherwise -> user verifier only. There is no
+//   try-one-then-the-other fallback, so a token is only ever checked against one key.
+//   Every device-authenticated request re-reads the devices row (as the device itself, own row
+//   only): unknown device, site mismatch, or status 'revoked' -> 401 DS_DEVICE_001.
 //
 // 401 DS_AUTH_001: missing / malformed / invalid / expired credentials.
+// 401 DS_DEVICE_001: device not enrolled or revoked.
 // 403 DS_AUTH_002: valid credentials whose kind or role is not allowed on this route
 //                  (incl. a device token on a user-only route).
-import { jwtVerify, type JWTPayload } from 'jose';
+import { decodeJwt, jwtVerify, type JWTPayload } from 'jose';
 import type { FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import { ApiError } from './errors';
+import { withRls } from './db';
 
 export const USER_ROLES = [
   'nurse_operator',
@@ -77,11 +84,21 @@ function userActorFrom(p: JWTPayload): Actor {
   };
 }
 
-/** Verifies the bearer token as a user access JWT, falling back to a device token. */
-async function authenticate(req: FastifyRequest): Promise<Actor> {
-  const token = bearerToken(req);
+const deviceRevoked = () => new ApiError(401, 'DS_DEVICE_001', 'Device is not enrolled or has been revoked');
+
+function audiencesOf(token: string): string[] {
+  let p: JWTPayload;
+  try {
+    p = decodeJwt(token); // UNVERIFIED: used only to pick the verifier
+  } catch {
+    throw unauthenticated();
+  }
+  return p.aud === undefined ? [] : Array.isArray(p.aud) ? p.aud : [p.aud];
+}
+
+async function authenticateUser(req: FastifyRequest, token: string): Promise<Actor> {
   const deps = req.server.deps;
-  let payload: JWTPayload | undefined;
+  let payload: JWTPayload;
   try {
     ({ payload } = await jwtVerify(token, deps.jwtVerifyKey, {
       issuer: deps.jwtIssuer,
@@ -91,10 +108,13 @@ async function authenticate(req: FastifyRequest): Promise<Actor> {
       requiredClaims: ['sub', 'exp', 'iat', 'jti'],
     }));
   } catch {
-    payload = undefined;
+    throw unauthenticated();
   }
-  if (payload) return userActorFrom(payload);
+  return userActorFrom(payload);
+}
 
+async function authenticateDevice(req: FastifyRequest, token: string): Promise<Actor> {
+  const deps = req.server.deps;
   let claims;
   try {
     claims = await deps.deviceTokenSigner.verify(token);
@@ -105,7 +125,21 @@ async function authenticate(req: FastifyRequest): Promise<Actor> {
       typeof claims.site_id !== 'string' || claims.site_id === '') {
     throw unauthenticated();
   }
-  return { kind: 'device', id: claims.device_id, roles: ['device'], siteId: claims.site_id, deidentify: false };
+  const actor: Actor = { kind: 'device', id: claims.device_id, roles: ['device'], siteId: claims.site_id, deidentify: false };
+  // Revocation check on every request. RLS (devices_select_self) lets a device read only its
+  // own row, and only when app.site_id matches the row's site.
+  const row = await withRls(deps.pool, actor, async (c) =>
+    (await c.query<{ status: string }>('SELECT status FROM devices WHERE id::text = $1', [actor.id])).rows[0]);
+  if (!row || row.status !== 'active') throw deviceRevoked();
+  return actor;
+}
+
+/** Verifies the bearer token with exactly one verifier, chosen by its (unverified) audience. */
+async function authenticate(req: FastifyRequest): Promise<Actor> {
+  const token = bearerToken(req);
+  return audiencesOf(token).includes(DEVICE_AUDIENCE)
+    ? authenticateDevice(req, token)
+    : authenticateUser(req, token);
 }
 
 function guard(allow: (a: Actor) => boolean): preHandlerAsyncHookHandler {

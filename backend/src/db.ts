@@ -1,6 +1,24 @@
 // Per-request RLS transaction. Every API query runs inside withRls().
 import type pg from 'pg';
-import type { Actor } from './auth';
+import { USER_ROLES, type Actor } from './auth';
+
+// Evaluated lazily (auth.ts and db.ts import each other).
+const isRlsRole = (r: string) => r === 'device' || (USER_ROLES as readonly string[]).includes(r);
+
+/**
+ * Actors are sometimes hand-built (e.g. the server-internal system_agent actor of the device
+ * routes), so the roles are re-checked here: each must be a known app role (the 7 app_role
+ * values or 'device') and must not contain ',' (app.roles is comma-joined; a comma would smuggle
+ * in extra roles). An empty role list is also refused.
+ */
+function assertRlsRoles(roles: readonly unknown[]): void {
+  if (!Array.isArray(roles) || roles.length === 0) throw new Error('withRls: actor has no roles');
+  for (const r of roles) {
+    if (typeof r !== 'string' || r.includes(',') || !isRlsRole(r)) {
+      throw new Error(`withRls: refusing actor with invalid role ${JSON.stringify(r)}`);
+    }
+  }
+}
 
 /**
  * Runs fn in one READ COMMITTED transaction as role app_api with the actor's app.* settings
@@ -17,6 +35,7 @@ export async function withRls<T>(
   actor: Actor,
   fn: (c: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  assertRlsRoles(actor.roles);
   const c = await pool.connect();
   let broken: Error | undefined;
   try {

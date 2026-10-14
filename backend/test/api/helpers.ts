@@ -1,9 +1,10 @@
 // Shared API test helpers: RS256 test keypair, token minting, and buildTestApp() with fakes.
 import { randomUUID } from 'node:crypto';
-import { SignJWT, generateKeyPair, jwtVerify } from 'jose';
+import { SignJWT, generateKeyPair } from 'jose';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app';
-import type { AppDeps, DeviceClaims, DeviceTokenSigner } from '../../src/deps';
+import type { AppDeps, DeviceTokenSigner } from '../../src/deps';
+import { DEVICE_TOKEN_ALG, JoseDeviceTokenSigner } from '../../src/deviceToken';
 import { getTestPool } from '../pg';
 import { FakeAppAttest, FakeObjectStore, FakePush, FakeQualityQueue, FakeWebauthn } from './fakes';
 
@@ -13,7 +14,7 @@ export const DEVICE_AUDIENCE = 'device-upload';
 /** User-JWT RS256 keypair (the IdP's key). */
 export const userKeys = await generateKeyPair('RS256');
 /** Separate keypair for device tokens (server-issued after App Attest). */
-const deviceKeys = await generateKeyPair('RS256');
+const deviceKeys = await generateKeyPair(DEVICE_TOKEN_ALG);
 
 export interface TokenOpts {
   sub?: string;
@@ -49,34 +50,27 @@ export async function tokenFor(role: string, siteId?: string, o: TokenOpts = {})
   return jwt.sign(o.key ?? userKeys.privateKey);
 }
 
-/** Test DeviceTokenSigner: RS256, aud "device-upload", 24 h. */
-export const deviceTokenSigner: DeviceTokenSigner = {
-  async sign(c: DeviceClaims): Promise<string> {
-    return new SignJWT({ device_id: c.device_id, site_id: c.site_id })
-      .setProtectedHeader({ alg: 'RS256' })
-      .setIssuer(TEST_ISSUER)
-      .setAudience(DEVICE_AUDIENCE)
-      .setSubject(c.device_id)
-      .setJti(randomUUID())
-      .setIssuedAt()
-      .setExpirationTime('24h')
-      .sign(deviceKeys.privateKey);
-  },
-  async verify(t: string): Promise<DeviceClaims> {
-    const { payload } = await jwtVerify(t, deviceKeys.publicKey, {
-      issuer: TEST_ISSUER,
-      audience: DEVICE_AUDIENCE,
-      algorithms: ['RS256'],
-      requiredClaims: ['exp'],
-    });
-    if (typeof payload.device_id !== 'string' || typeof payload.site_id !== 'string') {
-      throw new Error('device token missing claims');
-    }
-    return { device_id: payload.device_id, site_id: payload.site_id };
-  },
-};
+export const DEVICE_TOKEN_ISSUER = 'https://api.test.denguesense/devices';
 
-export function deviceTokenFor(deviceId: string, siteId: string): Promise<string> {
+/** The production signer with a test ES256 key (distinct from the RS256 user key). */
+export const deviceTokenSigner: DeviceTokenSigner = new JoseDeviceTokenSigner({
+  privateKey: deviceKeys.privateKey,
+  publicKey: deviceKeys.publicKey,
+  issuer: DEVICE_TOKEN_ISSUER,
+});
+
+/** Ward used for devices auto-enrolled by deviceTokenFor(). */
+export const testDeviceWard = (siteId: string) => `devw-${siteId}`;
+
+/**
+ * Mints a device token. Device auth checks the devices row on every request, so this first
+ * ensures an active device row exists (superuser insert; clearFixtures removes it).
+ */
+export async function deviceTokenFor(deviceId: string, siteId: string): Promise<string> {
+  const pool = getTestPool();
+  await pool.query('INSERT INTO wards(id, site_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [testDeviceWard(siteId), siteId]);
+  await pool.query('INSERT INTO devices(id, site_id, ward_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
+    [deviceId, siteId, testDeviceWard(siteId)]);
   return deviceTokenSigner.sign({ device_id: deviceId, site_id: siteId });
 }
 

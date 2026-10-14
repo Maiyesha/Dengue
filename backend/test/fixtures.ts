@@ -76,5 +76,10 @@ export async function clearFixtures(pool: pg.Pool): Promise<void> {
   await pool.query('DELETE FROM scans WHERE id = ANY($1)', [[SCAN_A, SCAN_B]]);
   await pool.query('DELETE FROM patients WHERE id = ANY($1)', [[PATIENT_A, PATIENT_B]]);
   await pool.query('DELETE FROM app_users WHERE id = ANY($1)', [ROLES.map(userFor)]);
+  // Devices / wards / challenges created by API tests for the fixture sites.
+  await pool.query('UPDATE scans SET device_id = NULL WHERE site_id = ANY($1) AND device_id IS NOT NULL', [[SITE_A, SITE_B]]);
+  await pool.query('DELETE FROM device_challenges WHERE site_id = ANY($1)', [[SITE_A, SITE_B]]);
+  await pool.query('DELETE FROM devices WHERE site_id = ANY($1)', [[SITE_A, SITE_B]]);
+  await pool.query('DELETE FROM wards WHERE site_id = ANY($1)', [[SITE_A, SITE_B]]);
   await pool.query('DELETE FROM sites WHERE id = ANY($1)', [[SITE_A, SITE_B]]);
 }

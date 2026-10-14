@@ -42,13 +42,18 @@ export class FakeQualityQueue implements QualityQueue {
 export class FakeAppAttest implements AppAttestVerifier {
   publicKey = Buffer.from('fake-attest-public-key');
   fail = false;
-  async verifyAttestation(): Promise<{ publicKey: Buffer }> {
+  readonly attestations: Array<{ keyId: string; attestationObject: Buffer; challenge: Buffer }> = [];
+  readonly assertions: Array<{ publicKey: Buffer; assertion: Buffer; clientDataHash: Buffer; prevCounter: number }> = [];
+  async verifyAttestation(keyId: string, attestationObject: Buffer, challenge: Buffer): Promise<{ publicKey: Buffer }> {
+    this.attestations.push({ keyId, attestationObject, challenge });
     if (this.fail) throw new Error('attestation invalid');
     return { publicKey: this.publicKey };
   }
-  async verifyAssertion(_pk: Buffer, assertion: Buffer, _cdh: Buffer, prevCounter: number): Promise<{ counter: number }> {
+  async verifyAssertion(publicKey: Buffer, assertion: Buffer, clientDataHash: Buffer, prevCounter: number): Promise<{ counter: number }> {
+    this.assertions.push({ publicKey, assertion, clientDataHash, prevCounter });
     if (this.fail) throw new Error('assertion invalid');
     // Fake encoding: the assertion buffer's text is the counter value; default prev+1.
+    // Deliberately does NOT enforce monotonicity: the route must.
     const n = Number(assertion.toString('utf8'));
     return { counter: Number.isFinite(n) && assertion.length > 0 ? n : prevCounter + 1 };
   }

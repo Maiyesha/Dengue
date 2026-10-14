@@ -9,6 +9,7 @@ import { artefactRoutes } from './routes/artefacts';
 import { clinicalDataRoutes } from './routes/clinicalData';
 import { patientRoutes } from './routes/patients';
 import { reviewRoutes } from './routes/review';
+import { deviceRoutes } from './routes/devices';
 import { scanRoutes } from './routes/scans';
 import './auth'; // FastifyRequest.actor type augmentation
 
@@ -76,6 +77,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(artefactRoutes);
   app.register(clinicalDataRoutes);
   app.register(reviewRoutes);
+  app.register(deviceRoutes);
 
   return app;
 }

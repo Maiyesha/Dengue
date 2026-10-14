@@ -7,7 +7,7 @@ import { withRls } from '../../src/db';
 import { audit } from '../../src/audit';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A } from '../fixtures';
-import { buildTestApp, tokenFor, deviceTokenFor, bearer } from './helpers';
+import { buildTestApp, tokenFor, deviceTokenFor, deviceTokenSigner, bearer } from './helpers';
 
 const pool = getTestPool();
 let app: FastifyInstance;
@@ -150,7 +150,51 @@ describe('requireDevice', () => {
   });
 });
 
+describe('device status and verifier routing', () => {
+  it('device token for an unknown (never enrolled) device → 401 DS_DEVICE_001', async () => {
+    const t = await deviceTokenSigner.sign({ device_id: randomUUID(), site_id: SITE_A });
+    const r = await get('/t/device', bearer(t));
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error.code).toBe('DS_DEVICE_001');
+  });
+
+  it('revoked device → 401 DS_DEVICE_001 on device and either routes', async () => {
+    const id = randomUUID();
+    const t = await deviceTokenFor(id, SITE_A);
+    expect((await get('/t/device', bearer(t))).statusCode).toBe(200);
+    await pool.query(`UPDATE devices SET status='revoked' WHERE id=$1`, [id]);
+    for (const url of ['/t/device', '/t/either']) {
+      const r = await get(url, bearer(t));
+      expect(r.statusCode).toBe(401);
+      expect(r.json().error.code).toBe('DS_DEVICE_001');
+    }
+  });
+
+  it('token site_id differing from the enrolled device site → 401 DS_DEVICE_001', async () => {
+    const id = randomUUID();
+    await deviceTokenFor(id, SITE_A); // enrols in site A
+    const forged = await deviceTokenSigner.sign({ device_id: id, site_id: SITE_B });
+    expect((await get('/t/device', bearer(forged))).json().error.code).toBe('DS_DEVICE_001');
+  });
+
+  it('verifier is chosen by aud: device-aud token signed with the user key → 401; user token never tried as device', async () => {
+    const t = await tokenFor('nurse_operator', SITE_A, { audience: 'device-upload' });
+    expect((await get('/t/either', bearer(t))).statusCode).toBe(401);
+    const u = await tokenFor('nurse_operator', SITE_A, { audience: 'something-else' });
+    expect((await get('/t/device', bearer(u))).statusCode).toBe(403);
+  });
+});
+
 describe('withRls', () => {
+  it('rejects hand-built actors with unknown roles, roles containing a comma, or no roles', async () => {
+    for (const roles of [['superuser'], ['nurse_operator,admin'], ['clinician', 'admin,x'], []]) {
+      const actor = { kind: 'user', id: 'u', roles, siteId: SITE_A, deidentify: false } as unknown as Actor;
+      await expect(withRls(pool, actor, async () => 'ran')).rejects.toThrow(/withRls/);
+    }
+    const ok: Actor = { kind: 'user', id: 'u', roles: ['system_agent'], siteId: SITE_A, deidentify: true };
+    expect(await withRls(pool, ok, async () => 'ran')).toBe('ran');
+  });
+
   it('withRls sets app.site_id visible to current_setting', async () => {
     const actor: Actor = { kind: 'user', id: 'rls-nurse_operator', roles: ['nurse_operator'], siteId: SITE_A, deidentify: true };
     const row = await withRls(pool, actor, async (c) =>
