@@ -4,6 +4,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import { ZodError } from 'zod';
 import { ApiError } from './errors';
 import type { AppDeps } from './deps';
+import './auth'; // FastifyRequest.actor type augmentation
 
 const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i;
 
@@ -33,6 +34,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     genReqId: (req) => traceIdOf(req.headers.traceparent) ?? randomBytes(16).toString('hex'),
   });
   app.decorate('deps', deps);
+  app.decorateRequest('actor', null); // set by the auth guards in ./auth
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
