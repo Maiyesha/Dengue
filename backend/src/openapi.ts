@@ -102,7 +102,8 @@ const ScanView = z.object({
   recaptures_remaining: z.record(z.string(), z.number().int()),
 });
 
-const R = {
+/** Success response schemas, one per response shape; tests validate real responses against these (expectContract). */
+export const R = {
   Health: z.object({ status: z.literal('alive') }),
   PatientLookup: z.object({
     patient_id: z.string().uuid(),
