@@ -2,7 +2,9 @@
 //
 // POST /v1/scans rule order (inside one RLS transaction, serialised per patient by an advisory lock):
 //   0. patient must be visible and on the caller's site, else 404
-//   1. same client_session_id already stored for this patient -> 200 with the existing scan
+//   1. same client_session_id already stored for this patient -> 200 with the existing scan, after a
+//      consent re-check (scan_consent_rejection): a block is 451 plus a committed
+//      capture_rejected_post_hoc audit row
 //   2. consent gate (451 DS_REG_001 / DS_REG_002); for offline=true a capture_rejected_post_hoc
 //      audit row is committed even though the request fails (no scan row is ever written)
 //   3. a non-revoked scan of the patient within 30 min either side of captured_at -> 409 DS_SCAN_001
@@ -19,7 +21,9 @@ import { actorOf, requireUser, requireUserOrDevice, type Actor } from '../auth';
 import { withRls } from '../db';
 import { audit } from '../audit';
 import { idempotent } from '../idempotency';
-import { CONSENT_MESSAGES, consentRejection, type ConsentRejection } from '../consentGate';
+import {
+  CONSENT_MESSAGES, auditPostHocRejection, consentRejection, scanConsent, type ConsentRejection,
+} from '../consentGate';
 
 const MAX_ATTEMPTS = 3;
 const DUPLICATE_WINDOW_SEC = 30 * 60;
@@ -136,7 +140,8 @@ type CreateOutcome =
 
 type RecaptureOutcome =
   | { kind: 'ok'; view: Awaited<ReturnType<typeof scanView>> }
-  | { kind: 'exhausted'; steps: CaptureStepT[]; recaptured: CaptureStepT[]; status: string };
+  | { kind: 'exhausted'; steps: CaptureStepT[]; recaptured: CaptureStepT[]; status: string }
+  | { kind: 'consent'; code: ConsentRejection };
 
 export async function scanRoutes(app: FastifyInstance): Promise<void> {
   const r = app.withTypeProvider<ZodTypeProvider>();
@@ -175,7 +180,17 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
         await c.query(`SELECT pg_advisory_xact_lock(hashtextextended('scan-create:' || $1, 0))`, [p.id]);
 
         const existing = await existingFor(c);
-        if (existing) return { kind: 'existing', scan: existing };
+        if (existing) {
+          // The replay of an already stored session re-checks consent (it may have been withdrawn
+          // since the scan was created); a block is audited post hoc and committed.
+          const gate = await scanConsent(c, existing.id);
+          if (!gate) throw notFound();
+          if (gate.block) {
+            await auditPostHocRejection(c, actor, actorRole(actor), existing.id, gate.block, gate.pseudonym);
+            return { kind: 'consent', code: gate.block };
+          }
+          return { kind: 'existing', scan: existing };
+        }
 
         const rejection = await consentRejection(c, p.id);
         if (rejection) {
@@ -302,6 +317,12 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
           )
         ).rows[0];
         if (!s || s.site_id !== actor.siteId) throw notFound();
+        const gate = await scanConsent(c, s.id);
+        if (!gate) throw notFound();
+        if (gate.block) {
+          await auditPostHocRejection(c, actor, actorRole(actor), s.id, gate.block, gate.pseudonym);
+          return { kind: 'consent', code: gate.block };
+        }
 
         const captured = s.metadata.capture_steps ?? [];
         const unknown = steps.filter((x) => !captured.includes(x));
@@ -369,6 +390,7 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
         return { kind: 'ok', view: await scanView(c, s.id, status, s.metadata) };
       });
 
+      if (out.kind === 'consent') throw new ApiError(451, out.code, CONSENT_MESSAGES[out.code]);
       if (out.kind === 'exhausted') {
         throw new ApiError(422, 'DS_QG_099', 'Maximum recaptures reached; step marked UNABLE_TO_ACQUIRE', {
           unable_to_acquire: out.steps,

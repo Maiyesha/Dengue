@@ -262,6 +262,16 @@
             },
             "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
           },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -2302,6 +2312,16 @@
             },
             "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
           },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -2821,6 +2841,16 @@
               }
             },
             "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
+          },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
           },
           "500": {
             "content": {

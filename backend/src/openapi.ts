@@ -201,11 +201,11 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
   },
   'POST /v1/scans/{id}/recapture': {
     operationId: 'recaptureScanSteps', summary: 'Request recapture of steps (max 3 attempts per step)', tag: 'scans', auth: 'user', roles: SITE,
-    idempotent: true, ok: { 200: R.ScanRead }, errors: [404, 422],
+    idempotent: true, ok: { 200: R.ScanRead }, errors: [404, 422, 451],
   },
   'POST /v1/scans/{id}/artefacts': {
     operationId: 'declareArtefact', summary: 'Declare an artefact and open a multipart upload (201 new, 200 if already declared)', tag: 'artefacts', auth: 'user_or_device', roles: SITE,
-    idempotent: true, ok: { 200: R.ArtefactDeclared, 201: R.ArtefactDeclared }, errors: [404, 422],
+    idempotent: true, ok: { 200: R.ArtefactDeclared, 201: R.ArtefactDeclared }, errors: [404, 422, 451],
   },
   'POST /v1/artefacts/{id}/parts/{n}/url': {
     operationId: 'getArtefactPartUrl', summary: 'Pre-signed URL for one upload part (valid 900 s)', tag: 'artefacts', auth: 'user_or_device', roles: SITE,
@@ -213,7 +213,7 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
   },
   'POST /v1/artefacts/{id}/complete': {
     operationId: 'completeArtefact', summary: 'Complete the upload and verify sha256; may trigger the quality gate', tag: 'artefacts', auth: 'user_or_device', roles: SITE,
-    idempotent: true, ok: { 200: R.ArtefactComplete }, errors: [404, 422],
+    idempotent: true, ok: { 200: R.ArtefactComplete }, errors: [404, 422, 451],
   },
   'POST /v1/scans/{id}/features/extract': {
     operationId: 'extractFeatures', summary: 'Request feature extraction (system agent; scan must be quality_passed)', tag: 'scans', auth: 'user', roles: ['system_agent'],

@@ -6,6 +6,12 @@
 // The scan row is locked FOR UPDATE for declare/complete, so concurrent final completes
 // serialise and exactly one UPDATE ... WHERE status='capture_pending' affects a row; only that
 // request enqueues (after commit).
+//
+// Consent re-check (F2): declare and complete call scan_consent_rejection() right after the scan
+// is located; a withdrawn/superseded consent is 451 DS_REG_001/002 with a committed
+// capture_rejected_post_hoc audit row. The function also supplies the patient pseudonym used for
+// every audit row of these routes (a device token cannot read patients).
+// device_id (F1): the first declare made with a device token sets scans.device_id (if NULL).
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -15,6 +21,7 @@ import { actorOf, requireUser, requireUserOrDevice, type Actor } from '../auth';
 import { withRls } from '../db';
 import { audit } from '../audit';
 import { idempotent } from '../idempotency';
+import { CONSENT_MESSAGES, auditPostHocRejection, scanConsent, type ConsentRejection } from '../consentGate';
 
 const CORE_STEPS = ['neutral_face', 'fingertip_ppg'];
 const PART_URL_TTL = 900 as const;
@@ -47,6 +54,10 @@ interface ArtefactRow {
 }
 
 const actorRole = (a: Actor) => a.roles[0];
+
+type DeclareOutcome =
+  | { kind: 'ok'; created: boolean; id: string; upload_id: string | null }
+  | { kind: 'consent'; code: ConsentRejection };
 const auditEvent = (a: Actor) => (a.kind === 'device' ? 'device_event' : 'clinician_action');
 
 async function pseudonymOf(c: pg.PoolClient, scanId: string): Promise<string> {
@@ -84,7 +95,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
       const actor = actorOf(req);
       const b = req.body;
       const sha = b.sha256.toLowerCase();
-      const out = await withRls(app.deps.pool, actor, async (c) => {
+      const out = await withRls(app.deps.pool, actor, async (c): Promise<DeclareOutcome> => {
         const s = (
           await c.query<{ id: string; site_id: string; status: string }>(
             'SELECT id, site_id, status::text AS status FROM scans WHERE id = $1 FOR UPDATE',
@@ -92,6 +103,18 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           )
         ).rows[0];
         if (!s || s.site_id !== actor.siteId) throw notFound();
+        const gate = await scanConsent(c, s.id);
+        if (!gate) throw notFound();
+        if (gate.block) {
+          // Committed: nothing else is written in this transaction.
+          await auditPostHocRejection(c, actor, actorRole(actor), s.id, gate.block, gate.pseudonym);
+          return { kind: 'consent', code: gate.block };
+        }
+        if (actor.kind === 'device') {
+          // F1: the first device to declare becomes the scan's device (push target for
+          // request_repeat). Never overwritten; the 0013 trigger enforces this for devices.
+          await c.query('UPDATE scans SET device_id = $2 WHERE id = $1 AND device_id IS NULL', [s.id, actor.id]);
+        }
 
         const existing = (
           await c.query<ArtefactRow>(
@@ -104,7 +127,7 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           if (existing.sha256 !== sha) {
             throw new ApiError(409, 'DS_UPLOAD_003', 'Artefact already declared with a different sha256');
           }
-          return { created: false, id: existing.id, upload_id: existing.upload_id };
+          return { kind: 'ok', created: false, id: existing.id, upload_id: existing.upload_id };
         }
 
         const att = await c.query(
@@ -130,13 +153,14 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           eventType: auditEvent(actor),
           actorId: actor.id,
           actorRole: actorRole(actor),
-          patientPseudonym: await pseudonymOf(c, s.id),
+          patientPseudonym: gate.pseudonym,
           resourceType: 'artefact',
           resourceId: id,
           outcome: 'artefact:declare',
         });
-        return { created: true, id, upload_id: uploadId };
+        return { kind: 'ok', created: true, id, upload_id: uploadId };
       });
+      if (out.kind === 'consent') throw new ApiError(451, out.code, CONSENT_MESSAGES[out.code]);
       return reply.status(out.created ? 201 : 200).send({ artefact_id: out.id, upload_id: out.upload_id });
     },
   );
@@ -186,6 +210,12 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           )
         ).rows[0];
         if (!s || s.site_id !== actor.siteId) throw notFound();
+        const gate = await scanConsent(c, s.id);
+        if (!gate) throw notFound();
+        if (gate.block) {
+          await auditPostHocRejection(c, actor, actorRole(actor), s.id, gate.block, gate.pseudonym);
+          return { kind: 'consent' as const, code: gate.block };
+        }
         const a = (
           await c.query<ArtefactRow>(
             'SELECT id, sha256, object_key, upload_id, status FROM artefacts WHERE id = $1',
@@ -207,13 +237,13 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
             eventType: auditEvent(actor),
             actorId: actor.id,
             actorRole: actorRole(actor),
-            patientPseudonym: await pseudonymOf(c, s.id),
+            patientPseudonym: gate.pseudonym,
             resourceType: 'artefact',
             resourceId: a.id,
             outcome: verified ? 'artefact:complete' : 'artefact:rejected_sha256_mismatch',
           });
         }
-        if (!verified) return { verified: false as const };
+        if (!verified) return { kind: 'mismatch' as const };
 
         let enqueue = false;
         if (await coreArtefactsVerified(c, s.id)) {
@@ -223,10 +253,11 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           );
           enqueue = (u.rowCount ?? 0) > 0;
         }
-        return { verified: true as const, enqueue, scanId: s.id };
+        return { kind: 'verified' as const, enqueue, scanId: s.id };
       });
 
-      if (!out.verified) {
+      if (out.kind === 'consent') throw new ApiError(451, out.code, CONSENT_MESSAGES[out.code]);
+      if (out.kind === 'mismatch') {
         throw new ApiError(422, 'DS_UPLOAD_001', 'Uploaded object sha256 does not match the declared value');
       }
       if (out.enqueue) await app.deps.qualityQueue.enqueue(out.scanId);

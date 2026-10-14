@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
-import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A } from '../fixtures';
+import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A, CONSENT_VERSION } from '../fixtures';
 import { buildTestApp, tokenFor, deviceTokenFor, bearer, type TestApp } from './helpers';
 
 const pool = getTestPool();
@@ -12,14 +12,18 @@ const scanIds: string[] = [];
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
-async function mkScan(status = 'capture_pending', attempts: Array<[string, number]> = [['neutral_face', 1], ['fingertip_ppg', 1]]) {
+async function mkScan(
+  status = 'capture_pending',
+  attempts: Array<[string, number]> = [['neutral_face', 1], ['fingertip_ppg', 1]],
+  patient = PATIENT_A,
+) {
   const id = randomUUID();
   scanIds.push(id);
   await pool.query(
     `INSERT INTO scans(id,client_session_id,patient_id,site_id,captured_at,protocol_version,status,metadata)
      VALUES ($1,gen_random_uuid(),$2,$3,now() - interval '40 days','p1',$4::scan_status,
              '{"capture_steps":["neutral_face","fingertip_ppg"]}'::jsonb)`,
-    [id, PATIENT_A, SITE_A, status],
+    [id, patient, SITE_A, status],
   );
   for (const [step, attempt] of attempts) {
     await pool.query(
@@ -58,8 +62,30 @@ async function upload(scan: string, step: string, kind: string, attempt = 1) {
 const statusOf = async (scan: string) =>
   (await pool.query('SELECT status::text AS s FROM scans WHERE id = $1', [scan])).rows[0].s;
 
+// Consent-gate patient (site A): tests append consent rows (latest recorded_at wins).
+const P_GATE = '00000000-0000-4000-a000-0000000006a1';
+const OLD_VERSION = 'art-v0';
+const consent = (patient: string, o: { version?: string; withdrawn?: boolean } = {}) =>
+  pool.query(
+    `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at,withdrawn_at)
+     VALUES ($1,$2,true,now(),${o.withdrawn ? 'now()' : 'NULL'})`,
+    [patient, o.version ?? CONSENT_VERSION],
+  );
+const postHoc = async (scan: string) =>
+  (await pool.query(
+    `SELECT event_type, actor_role, patient_pseudonym, resource_type, outcome FROM clinical_audit_log
+      WHERE event_type = 'capture_rejected_post_hoc' AND resource_id = $1 ORDER BY id`,
+    [scan],
+  )).rows;
+
 beforeAll(async () => {
   await seedFixtures(pool);
+  await pool.query(
+    `INSERT INTO patients(id,participant_code,pseudonym_id,site_id,cohort) VALUES ($1,'DS-RLSA-00601','ps-art-gate',$2,'dengue')
+     ON CONFLICT DO NOTHING`,
+    [P_GATE, SITE_A],
+  );
+  await pool.query(`INSERT INTO consent_versions(version,is_current) VALUES ($1,false) ON CONFLICT DO NOTHING`, [OLD_VERSION]);
   ta = await buildTestApp();
   app = ta.app;
 });
@@ -68,6 +94,9 @@ afterAll(async () => {
   await pool.query('DELETE FROM artefacts WHERE scan_id = ANY($1)', [scanIds]);
   await pool.query('DELETE FROM scan_step_attempts WHERE scan_id = ANY($1)', [scanIds]);
   await pool.query('DELETE FROM scans WHERE id = ANY($1)', [scanIds]);
+  await pool.query('DELETE FROM consents WHERE patient_id = $1', [P_GATE]);
+  await pool.query('DELETE FROM patients WHERE id = $1', [P_GATE]);
+  await pool.query('DELETE FROM consent_versions WHERE version = $1', [OLD_VERSION]);
   await clearFixtures(pool);
   await app.close();
 });
@@ -213,10 +242,11 @@ describe('artefact uploads', () => {
     expect((await declare(scan, 'neutral_face', 'roi_trace', 'x', 1, nurseB)).statusCode).toBe(404);
     expect((await declare(scan, 'neutral_face', 'roi_trace', 'x', 1, await tokenFor('researcher'))).statusCode).toBe(403);
     const ev = (await pool.query(
-      `SELECT count(*)::int AS n FROM clinical_audit_log WHERE event_type = 'device_event' AND resource_id = $1`,
+      `SELECT patient_pseudonym FROM clinical_audit_log WHERE event_type = 'device_event' AND resource_id = $1`,
       [id],
-    )).rows[0].n;
-    expect(ev).toBe(1);
+    )).rows;
+    // The device cannot read patients; the pseudonym comes from scan_consent_rejection().
+    expect(ev).toEqual([{ patient_pseudonym: 'ps-rls-a' }]);
   });
 
   it('rejects unknown fields and bad sha256 -> 400', async () => {
@@ -224,6 +254,57 @@ describe('artefact uploads', () => {
     const base = { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('a') };
     expect((await post(`/v1/scans/${scan}/artefacts`, { ...base, extra: 1 })).statusCode).toBe(400);
     expect((await post(`/v1/scans/${scan}/artefacts`, { ...base, sha256: 'abc' })).statusCode).toBe(400);
+  });
+});
+
+describe('device_id and consent re-check (F1, F2)', () => {
+  const scanDevice = async (scan: string) =>
+    (await pool.query('SELECT device_id FROM scans WHERE id = $1', [scan])).rows[0].device_id;
+
+  it('the first device declare sets scans.device_id; a later device does not overwrite it', async () => {
+    const scan = await mkScan();
+    const d1 = randomUUID();
+    const d2 = randomUUID();
+    expect((await declare(scan, 'neutral_face', 'video', 'v', 1, await deviceTokenFor(d1, SITE_A))).statusCode).toBe(201);
+    expect(await scanDevice(scan)).toBe(d1);
+    expect((await declare(scan, 'neutral_face', 'roi_trace', 'r', 1, await deviceTokenFor(d2, SITE_A))).statusCode).toBe(201);
+    expect(await scanDevice(scan)).toBe(d1);
+  });
+
+  it('a user declare does not set device_id', async () => {
+    const scan = await mkScan();
+    expect((await declare(scan, 'neutral_face', 'video', 'v')).statusCode).toBe(201);
+    expect(await scanDevice(scan)).toBeNull();
+  });
+
+  it('declare after withdrawal -> 451 DS_REG_001 with a committed post-hoc audit row (device pseudonym)', async () => {
+    await consent(P_GATE);
+    const scan = await mkScan('capture_pending', undefined, P_GATE);
+    await consent(P_GATE, { withdrawn: true });
+    const r = await declare(scan, 'neutral_face', 'video', 'v', 1, await deviceTokenFor(randomUUID(), SITE_A));
+    expect(r.statusCode).toBe(451);
+    expect(r.json().error.code).toBe('DS_REG_001');
+    expect((await pool.query('SELECT 1 FROM artefacts WHERE scan_id = $1', [scan])).rowCount).toBe(0);
+    expect(await scanDevice(scan)).toBeNull();
+    expect(await postHoc(scan)).toEqual([
+      { event_type: 'capture_rejected_post_hoc', actor_role: 'device', patient_pseudonym: 'ps-art-gate', resource_type: 'scan', outcome: 'DS_REG_001' },
+    ]);
+  });
+
+  it('complete after re-consent to a superseded version -> 451 DS_REG_002, artefact not verified', async () => {
+    await consent(P_GATE);
+    const scan = await mkScan('capture_pending', undefined, P_GATE);
+    const d = await declare(scan, 'neutral_face', 'video', 'v');
+    expect(d.statusCode).toBe(201);
+    ta.fakes.objectStore.put(keyOf(scan, 'neutral_face', 'video'), sha('v'));
+    await consent(P_GATE, { version: OLD_VERSION });
+    const r = await post(`/v1/artefacts/${d.json().artefact_id}/complete`);
+    expect(r.statusCode).toBe(451);
+    expect(r.json().error.code).toBe('DS_REG_002');
+    expect((await pool.query('SELECT status FROM artefacts WHERE id = $1', [d.json().artefact_id])).rows[0].status).toBe('declared');
+    expect(await postHoc(scan)).toEqual([
+      { event_type: 'capture_rejected_post_hoc', actor_role: 'nurse_operator', patient_pseudonym: 'ps-art-gate', resource_type: 'scan', outcome: 'DS_REG_002' },
+    ]);
   });
 });
 

@@ -16,7 +16,10 @@ const P_WITHDRAWN = '00000000-0000-4000-a000-0000000005b1';
 const P_SUPERSEDED = '00000000-0000-4000-a000-0000000005b2';
 const P_NO_PRIMARY = '00000000-0000-4000-a000-0000000005b3';
 const P_NO_CONSENT = '00000000-0000-4000-a000-0000000005b4';
-const ALL = [P_OK, P_OK2, P_RACE, P_WITHDRAWN, P_SUPERSEDED, P_NO_PRIMARY, P_NO_CONSENT];
+// Consents valid at creation, withdrawn / superseded afterwards (post-hoc re-check).
+const P_LATE_1 = '00000000-0000-4000-a000-0000000005c1';
+const P_LATE_2 = '00000000-0000-4000-a000-0000000005c2';
+const ALL = [P_OK, P_OK2, P_RACE, P_WITHDRAWN, P_SUPERSEDED, P_NO_PRIMARY, P_NO_CONSENT, P_LATE_1, P_LATE_2];
 const OLD_VERSION = 'rls-v0-scans';
 
 const T0 = Date.parse('2026-10-01T08:00:00Z');
@@ -78,8 +81,10 @@ beforeAll(async () => {
      VALUES ($1,$5,true,now() - interval '2 days',NULL),
             ($2,$5,true,now() - interval '2 days',NULL),
             ($3,$5,true,now() - interval '2 days',NULL),
-            ($4,$5,false,now() - interval '2 days',NULL)`,
-    [P_OK, P_OK2, P_RACE, P_NO_PRIMARY, CONSENT_VERSION],
+            ($4,$5,false,now() - interval '2 days',NULL),
+            ($6,$5,true,now() - interval '2 days',NULL),
+            ($7,$5,true,now() - interval '2 days',NULL)`,
+    [P_OK, P_OK2, P_RACE, P_NO_PRIMARY, CONSENT_VERSION, P_LATE_1, P_LATE_2],
   );
   // Withdrawn: consented, then a later (recorded_at) row records the withdrawal.
   await pool.query(
@@ -271,6 +276,26 @@ describe('POST /v1/scans', () => {
     expect(r.json().error.code).toBe('DS_IDEMPOTENCY_002');
   });
 
+  it('existing client_session_id after withdrawal → 451 DS_REG_001 with committed post-hoc audit', async () => {
+    const b = scanBody({ patient_id: P_LATE_1, captured_at: at(0) });
+    const first = await post('/v1/scans', b);
+    expect(first.statusCode).toBe(201);
+    await pool.query(
+      `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at,withdrawn_at)
+       VALUES ($1,$2,true,now() - interval '2 days',now())`,
+      [P_LATE_1, CONSENT_VERSION],
+    );
+    const again = await post('/v1/scans', b); // fresh Idempotency-Key: the 200 replay path
+    expect(again.statusCode).toBe(451);
+    expect(again.json().error.code).toBe('DS_REG_001');
+    const a = await pool.query(
+      `SELECT patient_pseudonym, resource_type, outcome FROM clinical_audit_log
+        WHERE event_type='capture_rejected_post_hoc' AND resource_id=$1`,
+      [first.json().scan.id],
+    );
+    expect(a.rows).toEqual([{ patient_pseudonym: 'ps-scan-8', resource_type: 'scan', outcome: 'DS_REG_001' }]);
+  });
+
   it('two parallel identical POSTs (same Idempotency-Key) → one row, two identical responses', async () => {
     const b = scanBody({ patient_id: P_RACE, captured_at: at(0) });
     const key = randomUUID();
@@ -426,6 +451,25 @@ describe('GET /v1/scans/:id and POST /v1/scans/:id/recapture', () => {
     expect(s.recaptures_remaining).toEqual({ neutral_face: 2, fingertip_ppg: 2, ocular_capture: 1, dorsal_tongue: 2 });
     const added = s.steps.find((x: { step: string; attempt: number }) => x.step === 'ocular_capture' && x.attempt === 2);
     expect(added.reason_codes).toEqual(['SQI_PPG_LOW']);
+  });
+
+  it('recapture after re-consent to a superseded version → 451 DS_REG_002, nothing recaptured, audited', async () => {
+    const r0 = await post('/v1/scans', scanBody({ patient_id: P_LATE_2, captured_at: at(0) }));
+    expect(r0.statusCode).toBe(201);
+    const id = r0.json().scan.id;
+    await pool.query(
+      `INSERT INTO consents(patient_id,consent_version,primary_research,consented_at) VALUES ($1,$2,true,now())`,
+      [P_LATE_2, OLD_VERSION],
+    );
+    const r = await recapture(id, ['ocular_capture']);
+    expect(r.statusCode).toBe(451);
+    expect(r.json().error.code).toBe('DS_REG_002');
+    expect((await getScan(id)).json().scan.recaptures_remaining.ocular_capture).toBe(2);
+    const a = await pool.query(
+      `SELECT patient_pseudonym, outcome FROM clinical_audit_log WHERE event_type='capture_rejected_post_hoc' AND resource_id=$1`,
+      [id],
+    );
+    expect(a.rows).toEqual([{ patient_pseudonym: 'ps-scan-9', outcome: 'DS_REG_002' }]);
   });
 
   it('recapture from quality_failed returns the scan to capture_pending', async () => {

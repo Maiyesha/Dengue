@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A, SCAN_A } from '../fixtures';
-import { buildTestApp, tokenFor, bearer, type TestFakes } from './helpers';
+import { buildTestApp, tokenFor, deviceTokenFor, bearer, type TestFakes } from './helpers';
 import { reviewChallenge, canonicalJson } from '../../src/routes/review';
 import { sha256Hex } from '../../src/audit';
 
@@ -46,6 +46,8 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await pool.query('DELETE FROM features WHERE scan_id = ANY($1)', [[SCAN_A, SCAN_NODEV]]);
+  await pool.query('DELETE FROM artefacts WHERE scan_id = $1', [SCAN_A]);
+  await pool.query('DELETE FROM scan_step_attempts WHERE scan_id = $1', [SCAN_A]);
   await pool.query('DELETE FROM scan_reviews WHERE scan_id = ANY($1)', [[SCAN_A, SCAN_NODEV, SCAN_OTHER]]);
   await pool.query('DELETE FROM site_protocol_flags WHERE site_id = ANY($1)', [[SITE_A, SITE_B]]);
   await pool.query('UPDATE scans SET device_id=NULL WHERE id = ANY($1)', [[SCAN_A]]);
@@ -121,6 +123,27 @@ describe('POST /v1/scans/:id/review', () => {
     expect(r.statusCode).toBe(201);
     expect(await status(SCAN_A)).toBe('flagged');
     expect(fakes.push.sent).toEqual([{ deviceId: DEVICE, payload: { type: 'repeat_requested', scan_id: SCAN_A } }]);
+  });
+
+  it('request_repeat after a device upload pushes to the uploading device (device_id set by declare)', async () => {
+    await setStatus(SCAN_A, 'capture_pending');
+    await pool.query(
+      `INSERT INTO scan_step_attempts(scan_id,step,attempt,device_verdict) VALUES ($1,'neutral_face',1,'ACCEPT') ON CONFLICT DO NOTHING`,
+      [SCAN_A],
+    );
+    const dev = randomUUID();
+    const d = await app.inject({
+      method: 'POST',
+      url: `/v1/scans/${SCAN_A}/artefacts`,
+      headers: { ...bearer(await deviceTokenFor(dev, SITE_A)), 'idempotency-key': randomUUID() },
+      payload: { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: 'a'.repeat(64) },
+    });
+    expect(d.statusCode).toBe(201);
+    await setStatus(SCAN_A, 'review_pending');
+    const r = await review(SCAN_A, { action: 'request_repeat' });
+    expect(r.statusCode).toBe(201);
+    expect(r.json().push).toBe('sent');
+    expect(fakes.push.sent).toEqual([{ deviceId: dev, payload: { type: 'repeat_requested', scan_id: SCAN_A } }]);
   });
 
   it('push failure still returns 201 with push failed and writes a device_event audit row', async () => {
