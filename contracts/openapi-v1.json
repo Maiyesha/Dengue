@@ -221,7 +221,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -371,7 +371,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -515,7 +515,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -654,7 +654,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -772,7 +772,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -877,7 +877,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -1115,7 +1115,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -1364,7 +1364,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -1511,7 +1511,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -1881,7 +1881,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2091,7 +2091,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2287,7 +2287,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2457,7 +2457,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2569,7 +2569,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2817,7 +2817,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -2929,6 +2929,12 @@
                     ],
                     "type": "string"
                   },
+                  "challenge_id": {
+                    "description": "From POST /v1/scans/{id}/review-challenge; single use, bound to this body",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  },
                   "note": {
                     "maxLength": 2000,
                     "minLength": 1,
@@ -2948,6 +2954,7 @@
                   }
                 },
                 "required": [
+                  "challenge_id",
                   "action",
                   "webauthn_assertion"
                 ],
@@ -3021,7 +3028,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -3069,7 +3076,165 @@
             "userBearer": []
           }
         ],
-        "summary": "Clinician review with WebAuthn step-up",
+        "summary": "Clinician review with WebAuthn step-up over a server-issued challenge (challenge_id)",
+        "tags": [
+          "review"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/review-challenge": {
+      "post": {
+        "operationId": "createReviewChallenge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "confirm",
+                      "flag",
+                      "request_repeat",
+                      "exclude"
+                    ],
+                    "type": "string"
+                  },
+                  "note": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "challenge": {
+                      "description": "32 random bytes, base64url (no padding); the WebAuthn challenge to sign",
+                      "type": "string"
+                    },
+                    "challenge_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "const": 300,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "challenge_id",
+                    "challenge",
+                    "expires_in"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Issue a single-use WebAuthn challenge bound to a review (5 min; no Idempotency-Key)",
         "tags": [
           "review"
         ],
@@ -3194,7 +3359,7 @@
                 }
               }
             },
-            "description": "Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)"
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
           },
           "403": {
             "content": {
@@ -3291,7 +3456,7 @@
     {
       "code": "DS_AUTH_003",
       "http_status": 401,
-      "meaning": "The WebAuthn step-up assertion for a clinician review could not be verified."
+      "meaning": "Clinician review step-up failed: the review challenge is unknown, expired, already used, issued to someone else or bound to a different scan/action/reason_code/note, or the WebAuthn assertion over it could not be verified. Challenges are single use (spent even on failure): request a new one."
     },
     {
       "code": "DS_CLINICAL_001",

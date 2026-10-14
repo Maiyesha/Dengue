@@ -1,9 +1,14 @@
 // Clinician review (WebAuthn step-up) and the gated experimental pulse-rate view.
 //
-// Review challenge = sha256 hex of canonical JSON {scan_id, action, reason_code|null, note|null}.
+// Review step-up (F8): POST /v1/scans/{id}/review-challenge (clinician, own site, review_pending)
+// issues 32 random bytes (base64url) bound to {scan_id, action, reason_code, sha256(note), reviewer},
+// stored as sha256 only, 5-minute TTL. POST /v1/scans/{id}/review names it by challenge_id; the
+// server consumes it (single use, committed even if the review then fails), checks the binding and
+// expiry (else 401 DS_AUTH_003), and verifies the WebAuthn assertion against the stored hash.
 // webauthn_assertion_hash = sha256 hex of the canonical JSON of the submitted assertion.
 // Experimental view: only rppg_face / rppg_fingertip 'heart_rate', never any other feature, never NaN;
 // empty (but audited) for a revoked/excluded scan or a scan whose consent is no longer valid.
+import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -39,17 +44,28 @@ export function canonicalJson(v: unknown): string {
     .join(',')}}`;
 }
 
-export const reviewChallenge = (scanId: string, action: string, reason: string | null, note: string | null) =>
-  sha256Hex(canonicalJson({ scan_id: scanId, action, reason_code: reason, note }));
+const CHALLENGE_BYTES = 32;
+const CHALLENGE_TTL_SEC = 300;
+
+const Action = z.enum(['confirm', 'flag', 'request_repeat', 'exclude']);
+const ReasonCode = z.string().min(1).max(100);
+const Note = z.string().min(1).max(2000);
+
+const ChallengeBody = z
+  .object({ action: Action, reason_code: ReasonCode.optional(), note: Note.optional() })
+  .strict();
 
 const ReviewBody = z
   .object({
-    action: z.enum(['confirm', 'flag', 'request_repeat', 'exclude']),
-    reason_code: z.string().min(1).max(100).optional(),
-    note: z.string().min(1).max(2000).optional(),
+    challenge_id: z.string().uuid().describe('From POST /v1/scans/{id}/review-challenge; single use, bound to this body'),
+    action: Action,
+    reason_code: ReasonCode.optional(),
+    note: Note.optional(),
     webauthn_assertion: z.record(z.string(), z.unknown()),
   })
   .strict();
+
+const stepUpFailed = (why: string) => new ApiError(401, 'DS_AUTH_003', why);
 
 const Params = z.object({ id: z.string().uuid() });
 
@@ -79,19 +95,84 @@ async function loadScan(c: pg.PoolClient, id: string, siteId: string | undefined
 export async function reviewRoutes(app: FastifyInstance): Promise<void> {
   const r = app.withTypeProvider<ZodTypeProvider>();
 
+  // Exempt from idempotency: the response carries a fresh nonce that must only exist as a hash.
+  r.post(
+    '/v1/scans/:id/review-challenge',
+    {
+      preHandler: [requireUser('clinician')],
+      config: { idempotencyExempt: true },
+      schema: { params: Params, body: ChallengeBody },
+    },
+    async (req) => {
+      const actor = actorOf(req);
+      const b = req.body;
+      const raw = randomBytes(CHALLENGE_BYTES);
+      const id = await withRls(app.deps.pool, actor, async (c) => {
+        const { s } = await loadScan(c, req.params.id, actor.siteId, false);
+        if (s.status !== 'review_pending') {
+          throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} is not awaiting review`);
+        }
+        await c.query('DELETE FROM review_challenges WHERE expires_at <= now()');
+        return (
+          await c.query<{ id: string }>(
+            `INSERT INTO review_challenges
+               (challenge_hash, scan_id, site_id, reviewer_user_id, action, reason_code, note_sha256, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8)) RETURNING id`,
+            [
+              createHash('sha256').update(raw).digest(),
+              s.id,
+              s.site_id,
+              actor.id,
+              b.action,
+              b.reason_code ?? null,
+              b.note === undefined ? null : sha256Hex(b.note),
+              CHALLENGE_TTL_SEC,
+            ],
+          )
+        ).rows[0].id;
+      });
+      return { challenge_id: id, challenge: raw.toString('base64url'), expires_in: CHALLENGE_TTL_SEC };
+    },
+  );
+
   r.post(
     '/v1/scans/:id/review',
     { preHandler: [requireUser('clinician'), idempotent()], schema: { params: Params, body: ReviewBody } },
     async (req, reply) => {
       const actor = actorOf(req);
       const b = req.body;
+
+      // 1. Spend the challenge in its own committed transaction (single use even when the review
+      //    fails below). Only the reviewer's own challenges are visible (RLS + WHERE).
+      const ch = await withRls(app.deps.pool, actor, async (c) => {
+        await loadScan(c, req.params.id, actor.siteId, false); // 404 before spending anything
+        return (
+          await c.query<{
+            scan_id: string; action: string; reason_code: string | null; note_sha256: string | null; hash: string; live: boolean;
+          }>(
+            `DELETE FROM review_challenges WHERE id = $1 AND reviewer_user_id = $2
+             RETURNING scan_id, action, reason_code, note_sha256, encode(challenge_hash, 'hex') AS hash,
+                       expires_at > now() AS live`,
+            [b.challenge_id, actor.id],
+          )
+        ).rows[0];
+      });
+      // 2. The body must match what the challenge was issued for.
+      const bound =
+        ch !== undefined &&
+        ch.live &&
+        ch.scan_id === req.params.id &&
+        ch.action === b.action &&
+        ch.reason_code === (b.reason_code ?? null) &&
+        ch.note_sha256 === (b.note === undefined ? null : sha256Hex(b.note));
+      if (!bound) throw stepUpFailed('Review challenge is unknown, expired, already used, or does not match this review');
+      // 3. The authenticator must have signed exactly that server challenge.
+      if (!(await app.deps.webauthn.verify(actor.id, b.webauthn_assertion, ch.hash))) {
+        throw stepUpFailed('WebAuthn assertion could not be verified');
+      }
+
       const out = await withRls(app.deps.pool, actor, async (c) => {
         const { s, pseudonym } = await loadScan(c, req.params.id, actor.siteId, true);
-
-        const challenge = reviewChallenge(s.id, b.action, b.reason_code ?? null, b.note ?? null);
-        if (!(await app.deps.webauthn.verify(actor.id, b.webauthn_assertion, challenge))) {
-          throw new ApiError(401, 'DS_AUTH_003', 'WebAuthn assertion could not be verified');
-        }
         if (s.status !== 'review_pending') {
           throw new ApiError(409, 'DS_STATE_001', `Scan in status ${s.status} is not awaiting review`);
         }

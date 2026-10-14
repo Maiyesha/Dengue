@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A, SCAN_A } from '../fixtures';
 import { buildTestApp, tokenFor, deviceTokenFor, bearer, type TestFakes } from './helpers';
-import { reviewChallenge, canonicalJson } from '../../src/routes/review';
+import { canonicalJson } from '../../src/routes/review';
 import { sha256Hex } from '../../src/audit';
 
 const pool = getTestPool();
@@ -48,6 +48,7 @@ afterAll(async () => {
   await pool.query('DELETE FROM features WHERE scan_id = ANY($1)', [[SCAN_A, SCAN_NODEV]]);
   await pool.query('DELETE FROM artefacts WHERE scan_id = $1', [SCAN_A]);
   await pool.query('DELETE FROM scan_step_attempts WHERE scan_id = $1', [SCAN_A]);
+  await pool.query('DELETE FROM review_challenges WHERE scan_id = ANY($1)', [[SCAN_A, SCAN_NODEV, SCAN_OTHER]]);
   await pool.query('DELETE FROM scan_reviews WHERE scan_id = ANY($1)', [[SCAN_A, SCAN_NODEV, SCAN_OTHER]]);
   await pool.query('DELETE FROM site_protocol_flags WHERE site_id = ANY($1)', [[SITE_A, SITE_B]]);
   await pool.query('UPDATE scans SET device_id=NULL WHERE id = ANY($1)', [[SCAN_A]]);
@@ -68,13 +69,33 @@ beforeEach(async () => {
   await setStatus(SCAN_NODEV, 'review_pending');
 });
 
-const review = async (id: string, body: Record<string, unknown>, role = 'clinician', site = SITE_A) =>
+/** POST /v1/scans/:id/review-challenge (no Idempotency-Key: the route is exempt). */
+const issue = async (id: string, body: Record<string, unknown>, role = 'clinician', site = SITE_A, o: { sub?: string } = {}) =>
   app.inject({
+    method: 'POST',
+    url: `/v1/scans/${id}/review-challenge`,
+    headers: bearer(await tokenFor(role, site, o)),
+    payload: body,
+  });
+
+/**
+ * Reviews `id`. Unless body.challenge_id is given, first obtains a challenge bound to the body
+ * (as clinician of site A); if that is refused, a random challenge_id is sent.
+ */
+const review = async (id: string, body: Record<string, unknown>, role = 'clinician', site = SITE_A) => {
+  let challengeId = body.challenge_id as string | undefined;
+  if (challengeId === undefined) {
+    const { action, reason_code, note } = body;
+    const c = await issue(id, { action, reason_code, note });
+    challengeId = c.statusCode === 200 ? c.json().challenge_id : randomUUID();
+  }
+  return app.inject({
     method: 'POST',
     url: `/v1/scans/${id}/review`,
     headers: { ...bearer(await tokenFor(role, site)), 'idempotency-key': randomUUID() },
-    payload: { webauthn_assertion: ASSERTION, ...body },
+    payload: { webauthn_assertion: ASSERTION, ...body, challenge_id: challengeId },
   });
+};
 const status = async (id: string) => (await pool.query('SELECT status::text AS s FROM scans WHERE id=$1', [id])).rows[0].s;
 
 describe('POST /v1/scans/:id/review', () => {
@@ -96,7 +117,9 @@ describe('POST /v1/scans/:id/review', () => {
   it('confirm moves review_pending->reviewed, stores hashes, passes the challenge, audits', async () => {
     const q = `SELECT count(*)::int AS n FROM clinical_audit_log WHERE outcome='review:confirm'`;
     const before = (await pool.query(q)).rows[0].n;
-    const r = await review(SCAN_A, { action: 'confirm', note: 'ok' });
+    const ch = await issue(SCAN_A, { action: 'confirm', note: 'ok' });
+    expect(ch.statusCode).toBe(200);
+    const r = await review(SCAN_A, { action: 'confirm', note: 'ok', challenge_id: ch.json().challenge_id });
     expect(r.statusCode).toBe(201);
     expect(r.json().status).toBe('reviewed');
     expect(await status(SCAN_A)).toBe('reviewed');
@@ -105,7 +128,9 @@ describe('POST /v1/scans/:id/review', () => {
     expect(row.action).toBe('confirm');
     expect(row.webauthn_assertion_hash).toBe(sha256Hex(canonicalJson(ASSERTION)));
     const call = fakes.webauthn.calls[0];
-    expect(call.expectedChallengeHash).toBe(reviewChallenge(SCAN_A, 'confirm', null, 'ok'));
+    // The verifier gets sha256 hex of the raw server challenge (what the authenticator signs).
+    const raw = Buffer.from(ch.json().challenge, 'base64url');
+    expect(call.expectedChallengeHash).toBe(createHash('sha256').update(raw).digest('hex'));
     expect(call.userId).toBe('rls-clinician');
     expect((await pool.query(q)).rows[0].n).toBe(before + 1);
   });
@@ -182,15 +207,118 @@ describe('POST /v1/scans/:id/review', () => {
   });
 
   it('scan not in review_pending -> 409 DS_STATE_001', async () => {
+    const ch = (await issue(SCAN_A, { action: 'confirm' })).json().challenge_id;
     await setStatus(SCAN_A, 'feature_complete');
-    const r = await review(SCAN_A, { action: 'confirm' });
+    const r = await review(SCAN_A, { action: 'confirm', challenge_id: ch });
     expect(r.statusCode).toBe(409);
     expect(r.json().error.code).toBe('DS_STATE_001');
   });
 
-  it('other-site scan gives 404 and unknown field gives 400', async () => {
+  it('other-site scan gives 404 and unknown field gives 400; challenge_id is required', async () => {
     expect((await review(SCAN_OTHER, { action: 'confirm' })).statusCode).toBe(404);
     expect((await review(SCAN_A, { action: 'confirm', extra: 1 })).statusCode).toBe(400);
+    const noChallenge = await app.inject({
+      method: 'POST',
+      url: `/v1/scans/${SCAN_A}/review`,
+      headers: { ...bearer(await tokenFor('clinician', SITE_A)), 'idempotency-key': randomUUID() },
+      payload: { action: 'confirm', webauthn_assertion: ASSERTION },
+    });
+    expect(noChallenge.statusCode).toBe(400);
+  });
+});
+
+describe('server-issued review challenge (F8)', () => {
+  const authErr = (r: { statusCode: number; json: () => { error: { code: string } } }) => {
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error.code).toBe('DS_AUTH_003');
+  };
+  const spent = async (id: string) =>
+    (await pool.query('SELECT 1 FROM review_challenges WHERE id = $1', [id])).rowCount === 0;
+
+  it('issues {challenge_id, challenge (32 bytes base64url), expires_in 300}, stored as a bound hash only', async () => {
+    const r = await issue(SCAN_A, { action: 'flag', reason_code: 'artefact', note: 'blurred' });
+    expect(r.statusCode).toBe(200);
+    const b = r.json();
+    expect(Object.keys(b).sort()).toEqual(['challenge', 'challenge_id', 'expires_in']);
+    expect(b.expires_in).toBe(300);
+    expect(b.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const raw = Buffer.from(b.challenge, 'base64url');
+    expect(raw.length).toBe(32);
+    const row = (await pool.query(
+      `SELECT challenge_hash, scan_id, site_id, reviewer_user_id, action, reason_code, note_sha256,
+              extract(epoch FROM expires_at - created_at)::int AS ttl
+         FROM review_challenges WHERE id = $1`, [b.challenge_id])).rows[0];
+    expect(row).toEqual({
+      challenge_hash: createHash('sha256').update(raw).digest(),
+      scan_id: SCAN_A,
+      site_id: SITE_A,
+      reviewer_user_id: 'rls-clinician',
+      action: 'flag',
+      reason_code: 'artefact',
+      note_sha256: sha256Hex('blurred'),
+      ttl: 300,
+    });
+    const cols = (await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'review_challenges'`)).rows.map((x) => x.column_name);
+    expect(cols).not.toContain('challenge');
+  });
+
+  it('clinician only, own site, review_pending only, strict body', async () => {
+    expect((await issue(SCAN_A, { action: 'confirm' }, 'nurse_operator')).statusCode).toBe(403);
+    expect((await issue(SCAN_OTHER, { action: 'confirm' })).statusCode).toBe(404);
+    expect((await issue(SCAN_A, { action: 'confirm', extra: 1 })).statusCode).toBe(400);
+    expect((await issue(SCAN_A, { action: 'approve' })).statusCode).toBe(400);
+    await setStatus(SCAN_A, 'feature_complete');
+    const r = await issue(SCAN_A, { action: 'confirm' });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error.code).toBe('DS_STATE_001');
+  });
+
+  it('replay: a challenge is single use', async () => {
+    const ch = (await issue(SCAN_A, { action: 'confirm' })).json().challenge_id;
+    expect((await review(SCAN_A, { action: 'confirm', challenge_id: ch })).statusCode).toBe(201);
+    await setStatus(SCAN_A, 'review_pending');
+    authErr(await review(SCAN_A, { action: 'confirm', challenge_id: ch }));
+    expect(await status(SCAN_A)).toBe('review_pending');
+  });
+
+  it('expiry: an expired challenge is refused (and spent)', async () => {
+    const ch = (await issue(SCAN_A, { action: 'confirm' })).json().challenge_id;
+    await pool.query(`UPDATE review_challenges SET expires_at = now() - interval '1 second' WHERE id = $1`, [ch]);
+    authErr(await review(SCAN_A, { action: 'confirm', challenge_id: ch }));
+    expect(await spent(ch)).toBe(true);
+    expect(fakes.webauthn.calls).toHaveLength(0);
+    expect(await status(SCAN_A)).toBe('review_pending');
+  });
+
+  it('body mismatch (action, reason_code, note, scan, reviewer) -> 401 and the challenge is spent', async () => {
+    const cases: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [{ action: 'confirm' }, { action: 'exclude' }],
+      [{ action: 'flag', reason_code: 'a' }, { action: 'flag', reason_code: 'b' }],
+      [{ action: 'flag', reason_code: 'a' }, { action: 'flag' }],
+      [{ action: 'confirm', note: 'x' }, { action: 'confirm', note: 'y' }],
+      [{ action: 'confirm', note: 'x' }, { action: 'confirm' }],
+    ];
+    for (const [bound, sent] of cases) {
+      const ch = (await issue(SCAN_A, bound)).json().challenge_id;
+      authErr(await review(SCAN_A, { ...sent, challenge_id: ch }));
+      expect(await spent(ch)).toBe(true);
+    }
+    // Bound to another scan.
+    const other = (await issue(SCAN_NODEV, { action: 'confirm' })).json().challenge_id;
+    authErr(await review(SCAN_A, { action: 'confirm', challenge_id: other }));
+    // Issued to another clinician.
+    const theirs = (await issue(SCAN_A, { action: 'confirm' }, 'clinician', SITE_A, { sub: 'rls-other-clinician' })).json().challenge_id;
+    authErr(await review(SCAN_A, { action: 'confirm', challenge_id: theirs }));
+    expect(await status(SCAN_A)).toBe('review_pending');
+    expect(fakes.webauthn.calls).toHaveLength(0);
+  });
+
+  it('a failed assertion also spends the challenge', async () => {
+    fakes.webauthn.result = false;
+    const ch = (await issue(SCAN_A, { action: 'confirm' })).json().challenge_id;
+    authErr(await review(SCAN_A, { action: 'confirm', challenge_id: ch }));
+    expect(await spent(ch)).toBe(true);
   });
 });
 

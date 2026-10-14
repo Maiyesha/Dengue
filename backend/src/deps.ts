@@ -39,6 +39,10 @@ export interface AppAttestVerifier {
 }
 
 export interface AssertionVerifier {
+  /**
+   * True when `assertion` is a valid WebAuthn assertion by one of `userId`'s credentials over the
+   * server-issued challenge whose sha256 hex is `expectedChallengeHash`.
+   */
   verify(userId: string, assertion: unknown, expectedChallengeHash: string): Promise<boolean>;
 }
 

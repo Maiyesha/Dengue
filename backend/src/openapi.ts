@@ -26,7 +26,7 @@ export const ERROR_CATALOG: readonly ErrorCatalogEntry[] = [
   { code: 'DS_AUD_002', http_status: 500, meaning: 'Database-level guard: the audit trigger requires READ COMMITTED isolation. A server defect if it ever surfaces; reported as DS_INTERNAL_001.' },
   { code: 'DS_AUTH_001', http_status: 401, meaning: 'Credentials missing, malformed, invalid or expired.' },
   { code: 'DS_AUTH_002', http_status: 403, meaning: 'Valid credentials, but the token kind or role is not allowed on this route (including a device token on a user-only route).' },
-  { code: 'DS_AUTH_003', http_status: 401, meaning: 'The WebAuthn step-up assertion for a clinician review could not be verified.' },
+  { code: 'DS_AUTH_003', http_status: 401, meaning: 'Clinician review step-up failed: the review challenge is unknown, expired, already used, issued to someone else or bound to a different scan/action/reason_code/note, or the WebAuthn assertion over it could not be verified. Challenges are single use (spent even on failure): request a new one.' },
   { code: 'DS_CLINICAL_001', http_status: 409, meaning: 'An observation_id or lab id is already in use for a different patient.' },
   { code: 'DS_DEVICE_001', http_status: 401, meaning: 'The device is not enrolled or has been revoked.' },
   { code: 'DS_DEVICE_002', http_status: 401, meaning: 'The App Attest assertion counter did not strictly increase (replay).' },
@@ -133,6 +133,11 @@ const R = {
   PartUrl: z.object({ url: z.string(), expires_in: z.literal(900) }),
   ArtefactComplete: z.object({ status: z.literal('received_verified') }),
   FeatureExtract: z.object({ scan_id: z.string().uuid(), status: z.literal('extraction_accepted') }),
+  ReviewChallenge: z.object({
+    challenge_id: z.string().uuid(),
+    challenge: z.string().describe('32 random bytes, base64url (no padding); the WebAuthn challenge to sign'),
+    expires_in: z.literal(300),
+  }),
   Review: z.object({
     review_id: z.string().uuid(),
     scan_id: z.string().uuid(),
@@ -224,8 +229,12 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
     operationId: 'extractFeatures', summary: 'Request feature extraction (system agent; scan must be quality_passed)', tag: 'scans', auth: 'user', roles: ['system_agent'],
     idempotent: true, ok: { 202: R.FeatureExtract }, errors: [404, 422],
   },
+  'POST /v1/scans/{id}/review-challenge': {
+    operationId: 'createReviewChallenge', summary: 'Issue a single-use WebAuthn challenge bound to a review (5 min; no Idempotency-Key)', tag: 'review', auth: 'user', roles: ['clinician'],
+    ok: { 200: R.ReviewChallenge }, errors: [400, 404, 409],
+  },
   'POST /v1/scans/{id}/review': {
-    operationId: 'reviewScan', summary: 'Clinician review with WebAuthn step-up', tag: 'review', auth: 'user', roles: ['clinician'],
+    operationId: 'reviewScan', summary: 'Clinician review with WebAuthn step-up over a server-issued challenge (challenge_id)', tag: 'review', auth: 'user', roles: ['clinician'],
     idempotent: true, ok: { 201: R.Review }, errors: [404],
   },
   'GET /v1/scans/{id}/experimental': {
@@ -256,7 +265,7 @@ export const ROUTE_DOCS: Record<string, RouteDoc> = {
 
 const ERROR_STATUS_TEXT: Record<number, string> = {
   400: 'Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)',
-  401: 'Unauthenticated (DS_AUTH_001) or device/assertion failure (DS_DEVICE_001..004, DS_AUTH_003)',
+  401: 'Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)',
   403: 'Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)',
   404: 'Not found or not visible to the caller (DS_NOT_FOUND)',
   409: 'Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)',

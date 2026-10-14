@@ -26,6 +26,7 @@ const EXPECTED_ROUTES = [
   'POST /v1/artefacts/{id}/parts/{n}/url',
   'POST /v1/artefacts/{id}/complete',
   'POST /v1/scans/{id}/features/extract',
+  'POST /v1/scans/{id}/review-challenge',
   'POST /v1/scans/{id}/review',
   'GET /v1/scans/{id}/experimental',
   'POST /v1/devices/challenge',
