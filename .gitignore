@@ -1,0 +1,19 @@
+# dependencies / build
+node_modules/
+dist/
+.build/
+*.xcodeproj/
+DerivedData/
+# local test database
+.embedded-pg/
+# SDD scratch
+.superpowers/
+# model weights and local tooling (not source)
+dengue_seg/
+forecast/
+.claude/
+.agents/
+skills-lock.json
+# OS
+.DS_Store
+Thumbs.db
