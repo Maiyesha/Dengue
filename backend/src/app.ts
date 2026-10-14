@@ -6,6 +6,7 @@ import { ApiError } from './errors';
 import type { AppDeps } from './deps';
 import { idempotencyPlugin } from './idempotency';
 import { patientRoutes } from './routes/patients';
+import { scanRoutes } from './routes/scans';
 import './auth'; // FastifyRequest.actor type augmentation
 
 const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i;
@@ -68,6 +69,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // Not encapsulated: its hooks must see every route registered after it.
   app.register(idempotencyPlugin);
   app.register(patientRoutes);
+  app.register(scanRoutes);
 
   return app;
 }
