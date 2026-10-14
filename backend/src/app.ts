@@ -5,6 +5,7 @@ import { ZodError } from 'zod';
 import { ApiError } from './errors';
 import type { AppDeps } from './deps';
 import { idempotencyPlugin } from './idempotency';
+import { artefactRoutes } from './routes/artefacts';
 import { patientRoutes } from './routes/patients';
 import { scanRoutes } from './routes/scans';
 import './auth'; // FastifyRequest.actor type augmentation
@@ -70,6 +71,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(idempotencyPlugin);
   app.register(patientRoutes);
   app.register(scanRoutes);
+  app.register(artefactRoutes);
 
   return app;
 }

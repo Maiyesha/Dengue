@@ -9,6 +9,7 @@ export class FakeObjectStore implements ObjectStore {
   readonly objects = new Map<string, string>();
   readonly uploads = new Map<string, { key: string; completed: boolean }>();
 
+  /** Sets the sha256 the store will report for `key` (tests use a wrong value to simulate corruption). */
   put(key: string, sha256: string): void {
     this.objects.set(key, sha256);
   }
