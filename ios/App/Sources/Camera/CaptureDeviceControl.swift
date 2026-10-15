@@ -14,6 +14,9 @@ import DengueCaptureCore
 ///   calls wait (bounded) for the completion handler before returning. Do not call
 ///   `configure` on the main thread.
 /// - The caller must already have selected an `activeFormat` that supports 30 fps.
+/// - Threading: run on the capture session queue (never main), with the session running and
+///   `sessionPreset = .inputPriority`; AVFoundation completion handlers fire only once frames
+///   flow, so otherwise the bounded waits time out and read-back fails.
 /// - No audio input and no photo output are ever created here.
 public final class AVCaptureDeviceControl: CaptureDeviceControl {
     private let device: AVCaptureDevice
@@ -55,12 +58,22 @@ public final class AVCaptureDeviceControl: CaptureDeviceControl {
 
     public var frameDurationMin: Double {
         get { CMTimeGetSeconds(device.activeVideoMinFrameDuration) }
-        set { locked { device.activeVideoMinFrameDuration = cmTime(newValue) } }
+        set { locked { if supportsFrameDuration(newValue) { device.activeVideoMinFrameDuration = cmTime(newValue) } } }
     }
 
     public var frameDurationMax: Double {
         get { CMTimeGetSeconds(device.activeVideoMaxFrameDuration) }
-        set { locked { device.activeVideoMaxFrameDuration = cmTime(newValue) } }
+        set { locked { if supportsFrameDuration(newValue) { device.activeVideoMaxFrameDuration = cmTime(newValue) } } }
+    }
+
+    /// Out-of-range durations raise an ObjC exception, so leave the value unchanged
+    /// when the active format cannot do this rate (read-back then reports notReady).
+    private func supportsFrameDuration(_ seconds: Double) -> Bool {
+        guard seconds > 0 else { return false }
+        let fps = 1.0 / seconds
+        return device.activeFormat.videoSupportedFrameRateRanges.contains {
+            fps >= $0.minFrameRate - 0.01 && fps <= $0.maxFrameRate + 0.01
+        }
     }
 
     // MARK: Exposure
@@ -72,6 +85,7 @@ public final class AVCaptureDeviceControl: CaptureDeviceControl {
     }
 
     public func setCustomExposure(durationSeconds: Double, iso: Float) throws {
+        guard device.isExposureModeSupported(.custom) else { throw CameraError.notReady(setting: "exposure") }
         let sem = DispatchSemaphore(value: 0)
         try lockedThrowing {
             let fmt = device.activeFormat
@@ -99,9 +113,14 @@ public final class AVCaptureDeviceControl: CaptureDeviceControl {
             let sem = DispatchSemaphore(value: 0)
             var started = false
             locked {
-                let gains = clamped(device.deviceWhiteBalanceGains)
-                device.setWhiteBalanceModeLocked(with: gains) { _ in sem.signal() }
-                started = true
+                if device.isLockingWhiteBalanceWithCustomDeviceGainsSupported {
+                    let gains = clamped(device.deviceWhiteBalanceGains)
+                    device.setWhiteBalanceModeLocked(with: gains) { _ in sem.signal() }
+                    started = true
+                } else {
+                    // Explicit gains would raise an ObjC exception; lock at the current gains.
+                    device.whiteBalanceMode = .locked
+                }
             }
             if started { _ = sem.wait(timeout: .now() + Self.completionTimeout) }
         }
@@ -164,7 +183,7 @@ public final class AVCaptureDeviceControl: CaptureDeviceControl {
             switch connection.preferredVideoStabilizationMode {
             case .off: return .off
             case .standard: return .standard
-            case .cinematic, .cinematicExtended, .cinematicExtendedEnhanced: return .cinematic
+            case .cinematic, .cinematicExtended: return .cinematic
             case .auto: return .auto
             @unknown default: return .auto
             }

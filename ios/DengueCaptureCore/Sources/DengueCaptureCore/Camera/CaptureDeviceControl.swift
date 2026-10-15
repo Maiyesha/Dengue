@@ -77,6 +77,8 @@ public final class FakeDeviceControl: CaptureDeviceControl {
     public private(set) var torchLevel: Float = 0
 
     public var ignoresFrameDuration = false
+    /// Simulates exposure changes altering frame duration afterwards.
+    public var exposureDriftsFrameDuration = false
     public var ignoresExposure = false
     public var ignoresWhiteBalanceLock = false
     public var ignoresFocusLock = false
@@ -92,6 +94,7 @@ public final class FakeDeviceControl: CaptureDeviceControl {
     public func setCustomExposure(durationSeconds: Double, iso: Float) throws {
         if ignoresExposure { return }
         exposureDurationSeconds = durationSeconds
+        if exposureDriftsFrameDuration { frameDurationMax = 1.0 / 24 }
         self.iso = iso
     }
 

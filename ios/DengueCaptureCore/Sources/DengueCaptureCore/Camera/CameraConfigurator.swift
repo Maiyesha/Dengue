@@ -9,6 +9,9 @@ public struct CameraConfigurator {
 
     public init() {}
 
+    /// Must run on the capture session queue (not main), with the session running and
+    /// `sessionPreset = .inputPriority`: AVFoundation completion handlers fire only once
+    /// frames flow. Throws `CameraError.notReady(setting:)` on any read-back mismatch.
     public func configure(_ d: CaptureDeviceControl, role: CameraRole, preferExposureMs: Double) throws -> AppliedCameraSettings {
         guard preferExposureMs == 10 || preferExposureMs == 20 else { throw CameraError.invalidExposure }
 
@@ -62,6 +65,12 @@ public struct CameraConfigurator {
             try? d.setTorchLevel(0)
             guard d.torchLevel == 0 else { throw CameraError.notReady(setting: "torch") }
         }
+
+        // Exposure/other changes can alter frame durations: re-verify before returning.
+        guard abs(d.frameDurationMin - frame) < 1e-4, abs(d.frameDurationMax - frame) < 1e-4 else {
+            throw CameraError.notReady(setting: "frameRate")
+        }
+        guard !d.videoHDREnabled else { throw CameraError.notReady(setting: "videoHDR") }
 
         let fps = 1.0 / d.frameDurationMax
         return AppliedCameraSettings(

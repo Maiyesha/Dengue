@@ -84,6 +84,14 @@ final class CameraConfiguratorTests: XCTestCase {
         }
     }
 
+    func testFrameRateDriftAfterExposureThrowsNotReady() {
+        let d = FakeDeviceControl()
+        d.exposureDriftsFrameDuration = true
+        XCTAssertThrowsError(try CameraConfigurator().configure(d, role: .frontFace, preferExposureMs: 10)) {
+            XCTAssertEqual($0 as? CameraError, .notReady(setting: "frameRate"))
+        }
+    }
+
     func testSettingsCodableRoundTrip() throws {
         let s = AppliedCameraSettings(fps: 30, exposureMs: 10, iso: 100, hdr: false, stabilization: "off", torch: 0)
         let back = try JSONDecoder().decode(AppliedCameraSettings.self, from: JSONEncoder().encode(s))
