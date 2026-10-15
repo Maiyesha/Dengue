@@ -187,3 +187,20 @@ public final class SecureEnclaveKeyStore: KeyStore {
         return d
     }
 }
+
+/// T13 relaunch sweep: lists per-artefact key ids only. The wrapping key (account `wrappingTag`) and anything
+/// that is not a UUID-shaped account are never listed, so the sweep can never destroy them.
+extension SecureEnclaveKeyStore: KeyEnumerating {
+    public func allKeyIds() throws -> [String] {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: service,
+                                kSecReturnAttributes as String: true,
+                                kSecMatchLimit as String: kSecMatchLimitAll]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess, let items = out as? [[String: Any]] else { throw StoreError.keychain(status) }
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+            .filter { $0 != wrappingTag && UUID(uuidString: $0) != nil }
+    }
+}

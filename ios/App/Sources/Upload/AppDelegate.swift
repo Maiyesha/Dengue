@@ -8,17 +8,26 @@ import DengueCaptureCore
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     private var activeObserver: NSObjectProtocol?
+    private var configObserver: NSObjectProtocol?
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         application.registerForRemoteNotifications()
-        if let c = UploadCoordinator.shared {
-            Task { await c.launch() }
-            activeObserver = NotificationCenter.default.addObserver(
-                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-                Task { await c.foreground() }
-            }
+        // T13: capture storage first (plaintext sweep, close sessions left open, reconcile sealed files), then
+        // held hand-offs are retried on launch, foreground and managed-config change.
+        DispatchQueue.global(qos: .utility).async { CaptureStorage.shared?.launch() }
+        if let c = UploadCoordinator.shared { Task { await c.launch() } }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            if let c = UploadCoordinator.shared { Task { await c.foreground() } }
+            DispatchQueue.global(qos: .utility).async { CaptureStorage.shared?.retryHeld() }
+        }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { _ in
+            // MDM may just have provisioned `api_base_url`: `shared` is re-tried on access.
+            if let c = UploadCoordinator.shared { Task { await c.launch() } }
+            DispatchQueue.global(qos: .utility).async { CaptureStorage.shared?.retryHeld() }
         }
         return true
     }

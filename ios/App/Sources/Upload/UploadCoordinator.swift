@@ -109,9 +109,16 @@ private final class BackgroundWindow: @unchecked Sendable {
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 final class UploadCoordinator: @unchecked Sendable {
-    static let shared: UploadCoordinator? = {
-        do { return try UploadCoordinator() } catch { return nil }
-    }()
+    private static let sharedLock = NSLock()
+    private static var instance: UploadCoordinator?
+
+    /// Created on first access once MDM has provisioned `api_base_url`; nil until then and re-tried on every
+    /// access, so a managed-config change enables uploads (and held hand-offs) without a relaunch.
+    static var shared: UploadCoordinator? {
+        sharedLock.lock(); defer { sharedLock.unlock() }
+        if instance == nil { instance = try? UploadCoordinator() }
+        return instance
+    }
 
     let uploader: BackgroundPartUploader
     let engine: UploadEngine
@@ -363,9 +370,8 @@ final class UploadCoordinator: @unchecked Sendable {
 
     // MARK: capture hand-off
 
-    /// Task 13: enqueues a finished capture (createScan + clinical data + artefacts) and drains.
-    func enqueue(plan: CaptureSessionPlan, participantCode: String) throws {
-        try plan.enqueue(on: engine, participantCode: participantCode)
+    /// Task 13: a capture hand-off was enqueued by `CaptureStorage` (core `CaptureHandoffService`); drain now.
+    func drainSoon() {
         Task { await withBackgroundTime { sc in await self.drain(shouldContinue: sc) } }
     }
 

@@ -29,7 +29,7 @@ final class FlowCoordinator: ObservableObject {
     private let consentSource: ConsentSource
     private let camera: CaptureCameraProviding
     private let experimentalEnabled: Bool
-    /// Seal + enqueue after the quality result (off for UI tests: the fake camera writes no video).
+    /// Hand-off to uploads (off for UI tests: the fake camera seals nothing).
     private let handoffEnabled: Bool
 
     // Per patient session (cleared by reset()).
@@ -39,13 +39,15 @@ final class FlowCoordinator: ObservableObject {
     private var capturedAt: Date?
     /// Per-attempt token: only this attempt may record, tick or deliver a result.
     private var currentRecording: RecordingSession?
-    /// Sealing of accepted attempts (video + roi_trace + metadata), awaited before the hand-off.
-    private var sealTasks: [Task<[SealedStepArtefact], Never>] = []
-    private var acceptedMetadata: [CaptureStep: CaptureMetadata] = [:]
-    /// Latest attempt's metadata (createScan metadata when no attempt was accepted).
+    /// Sealing of ACCEPTED attempts, awaited before the hand-off.
+    private var acceptedSealing: [Task<[SealedStepArtefact], Never>] = []
+    /// Accepted artefacts sealed so far (checkpointed so a crash never orphans them).
+    private var sealedSoFar: [SealedStepArtefact] = []
+    /// Latest face-step positioning medians; the fingertip step reuses them.
+    private var faceSummary: PositioningSummary?
+    private var acceptedFaceMetadata: CaptureMetadata?
     private var lastMetadata: CaptureMetadata?
     private var handedOff = false
-    private lazy var keys: KeyStore = SecureEnclaveKeyStore()
 
     /// Bumped after every flow mutation so SwiftUI re-reads the (non-observable) CaptureFlow.
     @Published private(set) var revision = 0
@@ -140,11 +142,14 @@ final class FlowCoordinator: ObservableObject {
 
     func thermalChanged(_ l: ThermalLevel) { flow.thermalChanged(l); refresh() }
 
+    /// Next patient. A session that recorded anything but was not handed off yet is handed off now (held if it
+    /// cannot be queued): nothing captured is ever shredded here.
     func reset() {
         if let rec = currentRecording { currentRecording = nil; camera.cancel(rec) }
         camera.stop()
-        if !handedOff { discardSealed() }   // abandoned session: crypto-shred anything already sealed
-        sealTasks = []; acceptedMetadata = [:]; lastMetadata = nil; handedOff = false
+        if !flow.attemptLog.isEmpty { handOff() }
+        acceptedSealing = []; sealedSoFar = []; faceSummary = nil
+        acceptedFaceMetadata = nil; lastMetadata = nil; handedOff = false
         sessionId = UUID(); patientId = nil; offline = false; capturedAt = nil; cameraMessage = nil
         flow.reset(); experimental = nil; showOutbox = false; refresh()
     }
@@ -180,15 +185,16 @@ final class FlowCoordinator: ObservableObject {
         currentRecording = rec
         refresh()
         let camera = self.camera
+        let positioning = step == .neutralFace ? nil : faceSummary
         Task { [weak self] in
             do {
-                let result = try await camera.record(rec, seconds: cfg.targetSeconds) { elapsed in
+                let result = try await camera.record(rec, seconds: cfg.targetSeconds, positioning: positioning) { elapsed in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentRecording === rec else { return }
                         self.recordingTick(elapsed: elapsed)
                     }
                 }
-                guard let self else { return }
+                guard let self else { Self.discardSealing(result); return }
                 await self.finishStep(result, rec: rec, config: cfg)
             } catch {
                 guard let self, self.currentRecording === rec else { return }   // paused: already handled
@@ -206,125 +212,64 @@ final class FlowCoordinator: ObservableObject {
     }
 
     private func finishStep(_ r: StepRecording, rec: RecordingSession, config: StepConfig) async {
-        guard currentRecording === rec, isRecording(rec) else { Self.deletePlaintext(r); return }
+        guard currentRecording === rec, isRecording(rec) else { Self.discardSealing(r); return }
         // Provisional on-device verdict off the main thread (the pulse gate is a DFT). Never yields a pulse rate.
         let verdict = await Task.detached { StepQualityInput(trace: r.trace, config: config).verdict() }.value
-        guard currentRecording === rec, isRecording(rec) else { Self.deletePlaintext(r); refresh(); return }
+        guard currentRecording === rec, isRecording(rec) else { Self.discardSealing(r); refresh(); return }
         currentRecording = nil
         lastMetadata = r.metadata
+        if r.step == .neutralFace, let p = r.positioning { faceSummary = p }
         flow.stepRecorded(duration: r.duration)
         if case .reviewingStep? = flow.machineState { flow.verdict(verdict) }
         let accepted = flow.attemptLog.last.map {
             $0.step == rec.step && $0.attempt == rec.attempt && $0.verdict == .accept
         } ?? false
-        if accepted, handoffEnabled, r.videoURL != nil {
-            acceptedMetadata[r.step] = r.metadata
-            let keys = self.keys
-            sealTasks.append(Task.detached { Self.seal(r, keys: keys) })
+        if accepted, handoffEnabled, let sealing = r.sealing {
+            if r.step == .neutralFace { acceptedFaceMetadata = r.metadata }
+            acceptedSealing.append(sealing)
+            let session = sessionId
+            Task { [weak self] in
+                let arts = await sealing.value
+                guard let self, self.sessionId == session, !self.handedOff else { return }
+                self.sealedSoFar += arts
+                CaptureStorage.shared?.checkpoint(self.pending(artefacts: self.sealedSoFar))
+            }
         } else {
-            Self.deletePlaintext(r)
+            Self.discardSealing(r)   // not accepted: never uploaded
         }
         if flow.screen == .qualityResult { handOff() }
         refresh()
     }
 
-    nonisolated private static func deletePlaintext(_ r: StepRecording) {
-        if let url = r.videoURL { try? FileManager.default.removeItem(at: url) }
+    /// Destroys the sealed artefacts of an attempt nobody will upload (rejected, paused meanwhile, or stale).
+    nonisolated private static func discardSealing(_ r: StepRecording) {
+        guard let sealing = r.sealing else { return }
+        Task.detached { CaptureStorage.shared?.destroy(await sealing.value) }
     }
 
-    // MARK: sealing and hand-off
+    // MARK: hand-off
 
-    /// Class C directory, excluded from backup, for sealed artefacts.
-    nonisolated private static func sealedDirectory() throws -> URL {
-        let fm = FileManager.default
-        var dir = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("DengueSense/sealed", isDirectory: true)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                               attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        var rv = URLResourceValues()
-        rv.isExcludedFromBackup = true
-        try dir.setResourceValues(rv)
-        return dir
+    private func pending(artefacts: [SealedStepArtefact]) -> PendingHandoff {
+        PendingHandoff(
+            sessionId: sessionId, patientId: patientId,
+            maskedCode: NurseCopy.maskedStudyID(flow.participantCode ?? ""),
+            capturedAt: capturedAt ?? Date(), offline: offline,
+            protocolVersion: CaptureProtocol.phaseADefault.version,
+            attempts: flow.attemptLog, vitals: flow.vitalRecords, artefacts: artefacts,
+            metadata: acceptedFaceMetadata ?? lastMetadata, isOpen: true)
     }
 
-    /// Writes the trace and metadata plaintext (Class B) beside the video, seals all three (Class C) and deletes
-    /// the plaintext. Any failure discards the attempt's files and keys (fail closed) and returns [].
-    nonisolated private static func seal(_ r: StepRecording, keys: KeyStore) -> [SealedStepArtefact] {
-        guard let video = r.videoURL else { return [] }
-        let captureDir = video.deletingLastPathComponent()
-        let stem = r.token.uuidString.lowercased()
-        let traceURL = captureDir.appendingPathComponent("\(stem).roi.json")
-        let metaURL = captureDir.appendingPathComponent("\(stem).meta.json")
-        let plaintexts: [(ArtefactKind, URL)] = [(.video, video), (.roiTrace, traceURL), (.metadata, metaURL)]
-        var out: [SealedStepArtefact] = []
-        do {
-            try r.trace.encoded().write(to: traceURL, options: [.atomic, .completeFileProtectionUnlessOpen])
-            try r.metadata.encoded().write(to: metaURL, options: [.atomic, .completeFileProtectionUnlessOpen])
-            let dir = try sealedDirectory()
-            let sealer = ArtefactSealer(keys: keys)
-            for (kind, url) in plaintexts {
-                let dest = dir.appendingPathComponent("\(stem).\(kind.rawValue).sealed")
-                let s = try CaptureHandoff.sealAndRemovePlaintext(input: url, output: dest, sealer: sealer)
-                try FileManager.default.setAttributes(
-                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: dest.path)
-                out.append(SealedStepArtefact(step: r.step, attempt: r.attempt, kind: kind, sealed: s))
-            }
-            return out
-        } catch {
-            for (_, url) in plaintexts { try? FileManager.default.removeItem(at: url) }
-            destroy(out.map { $0.sealed }, keys: keys)
-            return []
-        }
-    }
-
-    nonisolated private static func destroy(_ sealed: [SealedArtefact], keys: KeyStore) {
-        for s in sealed {
-            try? keys.destroy(id: s.keyId)
-            try? FileManager.default.removeItem(at: s.path)
-        }
-    }
-
-    private func discardSealed() {
-        let tasks = sealTasks
-        guard !tasks.isEmpty else { return }
-        let keys = self.keys
-        Task.detached {
-            for t in tasks { Self.destroy(await t.value.map { $0.sealed }, keys: keys) }
-        }
-    }
-
-    /// When the session completes: wait for sealing, build the core `CaptureHandoff` plan (createScan with every
-    /// attempt, clinical data, declare/upload/complete per accepted artefact) and enqueue it.
-    /// Fails closed: if anything required is missing, every sealed artefact of the session is crypto-shredded.
+    /// Session over: wait for sealing, then `CaptureStorage.submit` (enqueued, or held; never shredded).
     private func handOff() {
-        guard handoffEnabled, !handedOff else { return }
+        guard handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
         handedOff = true
         camera.stop()
-        let tasks = sealTasks
-        let keys = self.keys
-        let attempts = flow.attemptLog
-        let vitals = flow.vitalRecords
-        let code = flow.participantCode ?? ""
-        let sessionId = self.sessionId, patientId = self.patientId, offline = self.offline
-        let capturedAt = self.capturedAt ?? Date()
-        let meta = acceptedMetadata[.neutralFace] ?? acceptedMetadata.values.first ?? lastMetadata
+        let tasks = acceptedSealing
+        let base = pending(artefacts: [])
         Task.detached {
-            var sealed: [SealedStepArtefact] = []
-            for t in tasks { sealed += await t.value }
-            do {
-                guard let patientId, let meta, let uploads = UploadCoordinator.shared else {
-                    throw CaptureHandoffError.noAttempts
-                }
-                let plan = try CaptureHandoff().makeSessionPlan(
-                    sessionId: sessionId, patientId: patientId, capturedAt: capturedAt, offline: offline,
-                    protocolVersion: CaptureProtocol.phaseADefault.version,
-                    metadata: try CaptureHandoff.scanMetadata(from: meta),
-                    attempts: attempts, vitals: vitals, artefacts: sealed)
-                try uploads.enqueue(plan: plan, participantCode: code)
-                Self.destroy(plan.discarded, keys: keys)
-            } catch {
-                Self.destroy(sealed.map { $0.sealed }, keys: keys)
-            }
+            var p = base
+            for t in tasks { p.artefacts += await t.value }
+            storage.submit(p)
         }
     }
 }
