@@ -234,6 +234,15 @@ public final class CaptureFlow {
         VitalField.allCases.map { f in vitalIssues[f].map { "\(f):\($0)" } ?? "" }.joined(separator: ",")
     }
 
+    /// Every consumed attempt of the current session (createScan `device_attempts`).
+    public var attemptLog: [AttemptRecord] { machine?.attemptLog ?? [] }
+
+    /// Current recording attempt number, while recording.
+    public var recordingAttempt: Int? {
+        guard case .recording(_, let a)? = machine?.state else { return nil }
+        return a
+    }
+
     public func stepReasons(_ step: CaptureStep) -> [ReasonCode] { machine?.lastReasons[step] ?? [] }
 
     public var canCapture: Bool { screen == .capture && !thermalHold }

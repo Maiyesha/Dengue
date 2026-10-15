@@ -363,6 +363,12 @@ final class UploadCoordinator: @unchecked Sendable {
 
     // MARK: capture hand-off
 
+    /// Task 13: enqueues a finished capture (createScan + clinical data + artefacts) and drains.
+    func enqueue(plan: CaptureSessionPlan, participantCode: String) throws {
+        try plan.enqueue(on: engine, participantCode: participantCode)
+        Task { await withBackgroundTime { sc in await self.drain(shouldContinue: sc) } }
+    }
+
     /// Called by the capture flow once a session's artefacts are sealed.
     func enqueue(sessionId: UUID, participantCode: String, createScan: CreateScanRequest?, scanId: UUID?,
                  artefacts: [ArtefactUpload]) throws {

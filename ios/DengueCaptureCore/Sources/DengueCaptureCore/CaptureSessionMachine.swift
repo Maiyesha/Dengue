@@ -4,6 +4,17 @@ public enum StepVerdict: Equatable {
     case unableToAcquire([ReasonCode])
 }
 
+/// One consumed attempt and its effective device verdict (an exhausted recapture is logged as unableToAcquire).
+/// Paused / interrupted attempts are not consumed and not logged.
+public struct AttemptRecord: Equatable {
+    public var step: CaptureStep
+    public var attempt: Int
+    public var verdict: StepVerdict
+    public init(step: CaptureStep, attempt: Int, verdict: StepVerdict) {
+        self.step = step; self.attempt = attempt; self.verdict = verdict
+    }
+}
+
 public enum SessionOutcome: Equatable {
     case accepted
     case partial(failedCore: [CaptureStep])
@@ -47,6 +58,8 @@ public final class CaptureSessionMachine {
     public private(set) var state: SessionState
     /// Latest recapture / unable-to-acquire reasons per step (for the quality screen).
     public private(set) var lastReasons: [CaptureStep: [ReasonCode]] = [:]
+    /// Every consumed attempt in order, for createScan `device_attempts`.
+    public private(set) var attemptLog: [AttemptRecord] = []
 
     private let captureProtocol: CaptureProtocol
     private var index = 0
@@ -93,17 +106,20 @@ public final class CaptureSessionMachine {
         guard case .reviewingStep(let step, let attempt) = state else { return }
         switch v {
         case .accept:
+            attemptLog.append(AttemptRecord(step: step, attempt: attempt, verdict: v))
             lastReasons[step] = nil
             acceptedSteps.append(step)
             advance()
         case .recapture(let reasons):
             lastReasons[step] = reasons
             if attempt <= captureProtocol.maxRecapturesPerStep {
+                attemptLog.append(AttemptRecord(step: step, attempt: attempt, verdict: v))
                 state = .positioning(step)
             } else {
                 verdict(.unableToAcquire(reasons))
             }
         case .unableToAcquire(let reasons):
+            attemptLog.append(AttemptRecord(step: step, attempt: attempt, verdict: v))
             lastReasons[step] = reasons
             failedSteps.append(step)
             advance()
