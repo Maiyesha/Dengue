@@ -5,6 +5,7 @@ struct PatientSelectView: View {
     @ObservedObject var c: FlowCoordinator
     @State private var code = ""
     @State private var bed = ""
+    @State private var showOutbox = false
     var body: some View {
         VStack(spacing: 16) {
             TextField(NurseCopy.labelStudyID, text: $code)
@@ -13,6 +14,10 @@ struct PatientSelectView: View {
             Button(NurseCopy.buttonLookUp) { c.selectPatient(code: code, bed: bed.isEmpty ? nil : bed) }
                 .buttonStyle(.borderedProminent).disabled(code.isEmpty)
                 .accessibilityIdentifier("lookup-button")
-        }.padding()
+            // I2: uploads, needs-repeat sessions and the 7-day warnings are reachable from the start screen.
+            Button(NurseCopy.buttonOutbox) { showOutbox = true }.accessibilityIdentifier("outbox-button")
+        }
+        .padding()
+        .sheet(isPresented: $showOutbox) { OutboxView() }
     }
 }

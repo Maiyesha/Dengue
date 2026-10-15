@@ -137,6 +137,18 @@ final class CaptureStorage: @unchecked Sendable {
         try? handoffs.discard(sessionId: sessionId, reason: reason, engine: engine)
     }
 
+    /// C1: wraps data keys that were sealed before a KMS key was configured (repeat hand-off).
+    func wrapMissingKeys(_ artefacts: [SealedStepArtefact]) -> [SealedStepArtefact] {
+        guard let wrapper = handoffs.keyWrapper else { return artefacts }
+        return artefacts.map { a in
+            guard a.sealed.wrappedKey == nil, let key = try? keys.key(id: a.sealed.keyId),
+                  let w = try? wrapper.wrap(key) else { return a }
+            var b = a
+            b.sealed.wrappedKey = w
+            return b
+        }
+    }
+
     /// Destroys sealed artefacts nobody will upload (attempts the device did not accept).
     func destroy(_ artefacts: [SealedStepArtefact]) {
         for a in artefacts {

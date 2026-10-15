@@ -3,6 +3,10 @@ import DengueCaptureCore
 
 struct SavedView: View {
     @ObservedObject var c: FlowCoordinator
+    /// I2: live upload status (re-read every few seconds).
+    @State private var status: SessionStatus?
+    private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+
     var body: some View {
         let presented = ExperimentalPulsePresenter.present(
             c.experimental ?? ExperimentalResponse(enabled: false, items: []), monitorHR: c.flow.monitorHR)
@@ -22,10 +26,18 @@ struct SavedView: View {
                     }.accessibilityIdentifier("experimental-section")
                 }
             }
+            if let status {
+                Text(status.text(maskedCode: NurseCopy.maskedStudyID(c.flow.participantCode ?? "")))
+                    .font(.headline).accessibilityIdentifier("session-status")
+            } else {
+                Text(NurseCopy.offlineQueued).font(.footnote)
+            }
             Text(NurseCopy.disinfectReminder).font(.footnote)
-            Text(NurseCopy.offlineQueued).font(.footnote)
             Button(NurseCopy.buttonNextPatient) { c.reset() }
                 .buttonStyle(.borderedProminent).accessibilityIdentifier("next-patient-button")
-        }.padding()
+        }
+        .padding()
+        .onAppear { status = c.sessionStatus }
+        .onReceive(tick) { _ in status = c.sessionStatus }
     }
 }
