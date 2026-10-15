@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     /// identifier and keep the handler until `urlSessionDidFinishEvents(forBackgroundURLSession:)`.
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        guard identifier == "my.reainmaker.denguesense.upload", let c = UploadCoordinator.shared else {
+        guard identifier == UploadEngine.backgroundSessionIdentifier, let c = UploadCoordinator.shared else {
             completionHandler()
             return
         }

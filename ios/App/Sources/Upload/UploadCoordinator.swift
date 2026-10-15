@@ -65,8 +65,47 @@ final class DeviceCredentialStore: @unchecked Sendable {   // Keychain calls are
     private func delete(account: String) { SecItemDelete(query(account) as CFDictionary) }
 }
 
+
+/// One `beginBackgroundTask` window. The expiration handler ends the task (exactly once) and flips
+/// `isExpired`, which the engine checks before starting each outbox item.
+private final class BackgroundWindow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var id: UIBackgroundTaskIdentifier = .invalid
+    private var expired = false
+    private var ended = false
+
+    var isExpired: Bool { lock.lock(); defer { lock.unlock() }; return expired }
+
+    /// Main thread only.
+    @MainActor func begin() {
+        let tid = UIApplication.shared.beginBackgroundTask(withName: "denguesense.upload") { [weak self] in
+            self?.expire()   // runs on the main thread
+        }
+        lock.lock(); id = tid; lock.unlock()
+    }
+
+    private func expire() {
+        lock.lock(); expired = true; lock.unlock()
+        end()
+    }
+
+    /// Ends the background task once; safe from any thread and from the expiration handler.
+    func end() {
+        lock.lock()
+        guard !ended, id != .invalid else { lock.unlock(); return }
+        ended = true
+        let tid = id
+        lock.unlock()
+        if Thread.isMainThread {
+            UIApplication.shared.endBackgroundTask(tid)
+        } else {
+            DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(tid) }
+        }
+    }
+}
+
 /// App composition root for uploads: background part uploader, core `UploadEngine`, device token
-/// (enrol / `renewIfDue`), APNs registration, verdict refresh.
+/// (enrol / `renewIfDue`, single-flight), APNs registration, verdict refresh, retry wake-ups.
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 final class UploadCoordinator: @unchecked Sendable {
@@ -80,10 +119,14 @@ final class UploadCoordinator: @unchecked Sendable {
     private let api: URLSessionDengueAPI
     private let enrolment: DeviceEnrolment
     private let credentials: DeviceCredentialStore
+    /// Concurrent wakes (launch, push, part completion, foreground) share one renew/enrol.
+    private let tokenFlight = SingleFlight<Bool>()
     private let lock = NSLock()
     private var tokenState: DeviceTokenState?
+    private var tokenRefused = false
     private var launched = false
     private var pendingPushToken: String?
+    private var wakeTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) throws {
         let fm = FileManager.default
@@ -105,7 +148,7 @@ final class UploadCoordinator: @unchecked Sendable {
         #else
         outbox = Outbox(store: try FileOutboxStore(directory: base.appendingPathComponent("outbox")), clock: clock)
         #endif
-        uploader = try BackgroundPartUploader(baseDirectory: base)
+        uploader = try BackgroundPartUploader(baseDirectory: base)   // creates the background session
         let sessions = try FileUploadSessionStore(directory: base.appendingPathComponent("upload-sessions"))
 
         let creds = DeviceCredentialStore()
@@ -120,21 +163,25 @@ final class UploadCoordinator: @unchecked Sendable {
         uploader.onPartFinished = { [weak self] in
             // Background relaunch: nobody is waiting on the part; drain to consume it and start the next part.
             guard let self else { return }
-            Task { await self.withBackgroundTime { await self.drain() } }
+            Task { await self.withBackgroundTime { sc in await self.drain(shouldContinue: sc) } }
         }
     }
 
     // MARK: lifecycle
 
-    /// First call per process: recreate the background session, renew/enrol the device token, recover the
-    /// outbox (recoverInFlight, interrupted quarantines), drain, poll verdicts. Later calls just drain.
+    /// First call per process: renew/enrol the device token, recover the outbox (recoverInFlight, interrupted
+    /// quarantines), drain, poll verdicts. Later calls just drain.
     func launch() async {
         let first: Bool = { lock.lock(); defer { lock.unlock() }; let f = !launched; launched = true; return f }()
-        guard first else { await drain(); return }
-        uploader.activate()
-        await withBackgroundTime {
-            await self.prepareDeviceToken()
-            await self.engine.launch()
+        guard first else {
+            await withBackgroundTime { sc in await self.drain(shouldContinue: sc) }
+            return
+        }
+        await withBackgroundTime { sc in
+            _ = await self.prepareDeviceToken()
+            let wake = await self.engine.launch(shouldContinue: sc)
+            self.scheduleWake(wake)
+            if sc() { await self.redrainIfTokenRefused(shouldContinue: sc) }
             await self.engine.refreshVerdicts()
         }
     }
@@ -145,17 +192,49 @@ final class UploadCoordinator: @unchecked Sendable {
         await engine.refreshVerdicts()
     }
 
-    func drain() async {
-        await prepareDeviceToken()
-        await engine.drain()
+    /// Renew/enrol if needed, drain, then schedule the next wake-up for pending retries.
+    func drain(shouldContinue: @escaping () -> Bool = { true }) async {
+        _ = await prepareDeviceToken()
+        let wake = await engine.drain(shouldContinue: shouldContinue)
+        scheduleWake(wake)
+        if shouldContinue() { await redrainIfTokenRefused(shouldContinue: shouldContinue) }
+    }
+
+    /// The engine stopped on a refused device token: renew (or re-enrol) now and, if that produced a token,
+    /// drain again instead of waiting for the item's backoff.
+    private func redrainIfTokenRefused(shouldContinue: @escaping () -> Bool) async {
+        let refused: Bool = { lock.lock(); defer { lock.unlock() }; let r = tokenRefused; tokenRefused = false; return r }()
+        guard refused, await prepareDeviceToken() else { return }
+        scheduleWake(await engine.drain(shouldContinue: shouldContinue))
     }
 
     /// Silent APNs push; the payload carries only `scan_id`, which is not needed beyond triggering a poll.
     func handleSilentPush(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
         guard userInfo["scan_id"] is String else { return .noData }
-        await prepareDeviceToken()
-        await engine.refreshVerdicts()
+        await withBackgroundTime { sc in
+            if await self.prepareDeviceToken(), sc() {   // a fresh token may unblock waiting uploads
+                self.scheduleWake(await self.engine.drain(shouldContinue: sc))
+            }
+            await self.engine.refreshVerdicts()
+        }
         return .newData
+    }
+
+    // MARK: retry wake-ups
+
+    /// Re-drains at the engine's `nextWakeAt` (earliest retry backoff). In the background the app is usually
+    /// suspended before this fires; launch, pushes and background-session events drain then.
+    private func scheduleWake(_ at: Date?) {
+        lock.lock(); defer { lock.unlock() }
+        wakeTask?.cancel()
+        wakeTask = nil
+        guard let at else { return }
+        let delay = max(1.0, at.timeIntervalSinceNow)   // never a hot loop on already-due work
+        wakeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await self.withBackgroundTime { sc in await self.drain(shouldContinue: sc) }
+        }
     }
 
     // MARK: APNs
@@ -199,25 +278,33 @@ final class UploadCoordinator: @unchecked Sendable {
         return t.accessToken
     }
 
+    /// Single-flight (core `SingleFlight`): concurrent callers await the same renew/enrol.
+    /// Returns true when a new device token was obtained (renewed or enrolled).
+    private func prepareDeviceToken() async -> Bool {
+        await tokenFlight.run { [weak self] in await self?.prepareDeviceTokenOnce() ?? false }
+    }
+
     /// Renews the device token when due (`DeviceEnrolment.renewIfDue`); enrols (or resumes an interrupted
     /// enrolment from the Keychain-persisted `EnrolmentProgress`) when there is no usable credential.
-    private func prepareDeviceToken() async {
+    private func prepareDeviceTokenOnce() async -> Bool {
         if let cred = credentials.loadCredential() {
             var state: DeviceTokenState = {
                 lock.lock(); defer { lock.unlock() }
                 return tokenState ?? DeviceTokenState(issuedAt: cred.issuedAt, expiresIn: cred.expiresIn)
             }()
+            var renewed = false
             if let r = try? await enrolment.renewIfDue(state: &state, deviceId: cred.deviceId, keyId: cred.keyId) {
                 credentials.saveCredential(.init(deviceId: cred.deviceId, keyId: cred.keyId, deviceToken: r.deviceToken,
                                                  issuedAt: r.state.issuedAt, expiresIn: r.state.expiresIn))
+                renewed = true
             }
             lock.lock(); tokenState = state; lock.unlock()
-            guard state.reEnrolRequired else { return }
+            guard state.reEnrolRequired else { return renewed }
             credentials.clearCredential()   // revoked / DS_DEVICE_001: fall through to a fresh enrolment
             lock.lock(); tokenState = nil; lock.unlock()
         }
         let managed = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed") ?? [:]
-        guard Self.userAccessToken() != nil, let ward = managed["ward_id"] as? String else { return }
+        guard Self.userAccessToken() != nil, let ward = managed["ward_id"] as? String else { return false }
         let resume = credentials.loadProgress()
         do {
             let c = try await enrolment.enrol(wardId: ward, resume: resume,
@@ -227,14 +314,20 @@ final class UploadCoordinator: @unchecked Sendable {
             credentials.clearProgress()
             lock.lock(); tokenState = c.state; lock.unlock()
             await sendPendingPushToken()
+            return true
         } catch APIError.reEnrol {
             credentials.clearProgress()   // the attested key was refused: start over next time
-        } catch {}
+            return false
+        } catch {
+            return false
+        }
     }
 
-    /// The engine kept the item; make the next `prepareDeviceToken` renew (or re-enrol).
+    /// The engine kept the item and stopped; make the next `prepareDeviceToken` renew (or re-enrol) and flag
+    /// a re-drain (`redrainIfTokenRefused`).
     private func deviceTokenRefused(_ e: APIError) {
         lock.lock(); defer { lock.unlock() }
+        tokenRefused = true
         if e == .reEnrol {
             var s = tokenState ?? DeviceTokenState(issuedAt: .distantPast, expiresIn: 0)
             s.recordFailure(.reEnrol, at: Date())
@@ -246,12 +339,13 @@ final class UploadCoordinator: @unchecked Sendable {
 
     // MARK: background time
 
-    private func withBackgroundTime(_ work: @escaping () async -> Void) async {
-        let id = await MainActor.run {
-            UIApplication.shared.beginBackgroundTask(withName: "denguesense.upload", expirationHandler: nil)
-        }
-        await work()
-        await MainActor.run { UIApplication.shared.endBackgroundTask(id) }
+    /// Runs `work` inside a background-task window. `work` receives `shouldContinue`, false once iOS signals
+    /// expiry; the expiration handler ends the task immediately (once), so the watchdog never kills the app.
+    private func withBackgroundTime(_ work: @escaping (_ shouldContinue: @escaping () -> Bool) async -> Void) async {
+        let window = BackgroundWindow()
+        await window.begin()
+        await work { !window.isExpired }
+        window.end()
     }
 
     // MARK: capture hand-off
@@ -261,6 +355,6 @@ final class UploadCoordinator: @unchecked Sendable {
                  artefacts: [ArtefactUpload]) throws {
         try engine.enqueueSession(sessionId: sessionId, participantCode: participantCode, createScan: createScan,
                                   scanId: scanId, artefacts: artefacts)
-        Task { await withBackgroundTime { await self.drain() } }
+        Task { await withBackgroundTime { sc in await self.drain(shouldContinue: sc) } }
     }
 }

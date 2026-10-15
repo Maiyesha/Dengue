@@ -15,7 +15,7 @@ import DengueCaptureCore
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml. Exercise on a real device
 /// launched from the Home screen (the debugger prevents suspension).
 final class BackgroundPartUploader: NSObject, PartUploader, URLSessionTaskDelegate, URLSessionDelegate {
-    static let identifier = "my.reainmaker.denguesense.upload"
+    static let identifier = UploadEngine.backgroundSessionIdentifier
 
     private let partsDir: URL
     private let finishedFile: URL
@@ -32,19 +32,13 @@ final class BackgroundPartUploader: NSObject, PartUploader, URLSessionTaskDelega
     private let delegateQueue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 1
-        q.name = "my.reainmaker.denguesense.upload.delegate"
+        q.name = UploadEngine.backgroundSessionIdentifier + ".delegate"
         return q
     }()
 
-    private lazy var session: URLSession = {
-        let cfg = URLSessionConfiguration.background(withIdentifier: "my.reainmaker.denguesense.upload")
-        cfg.sessionSendsLaunchEvents = true
-        cfg.isDiscretionary = false
-        cfg.allowsCellularAccess = true
-        cfg.httpMaximumConnectionsPerHost = 2
-        cfg.timeoutIntervalForResource = 24 * 3600
-        return URLSession(configuration: cfg, delegate: self, delegateQueue: delegateQueue)
-    }()
+    /// Created exactly once at the end of `init` (it needs `self` as delegate) and never reassigned, so reads
+    /// from any thread after init are race-free. Creating it at init also reconnects iOS's pending events.
+    private var session: URLSession!
 
     /// Codable mirror of `PartUploadOutcome` for the on-disk map.
     private enum Outcome: Codable, Equatable {
@@ -79,16 +73,19 @@ final class BackgroundPartUploader: NSObject, PartUploader, URLSessionTaskDelega
            let m = try? JSONDecoder().decode([String: Outcome].self, from: d) {
             finished = m
         }
+        let cfg = URLSessionConfiguration.background(withIdentifier: UploadEngine.backgroundSessionIdentifier)
+        cfg.sessionSendsLaunchEvents = true
+        cfg.isDiscretionary = false
+        cfg.allowsCellularAccess = true
+        cfg.httpMaximumConnectionsPerHost = 2
+        cfg.timeoutIntervalForResource = 24 * 3600
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: delegateQueue)
     }
-
-    /// Recreates the background session at launch so iOS can deliver pending events to this delegate.
-    func activate() { _ = session }
 
     /// AppDelegate: store the handler; it is called from `urlSessionDidFinishEvents`.
     func handleEvents(identifier: String, completionHandler: @escaping () -> Void) {
         guard identifier == Self.identifier else { completionHandler(); return }
         lock.lock(); eventsCompletionHandler = completionHandler; lock.unlock()
-        activate()
     }
 
     // MARK: PartUploader
