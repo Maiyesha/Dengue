@@ -30,10 +30,18 @@ enum RecorderError: Error {
 /// - Every attempt carries a `RecordingSession` token; samples, appends and ticks happen only while it is current.
 /// - Plaintext goes to `CaptureStorage.captureDirectory` (Class B, verified) or recording is refused.
 /// - Sealing starts in the `finishWriting` completion (`StepRecording.sealing`).
+/// - I1 positioning: `startPositioning` runs the session with continuous auto exposure / white balance / focus
+///   and a preview (`previewSession`). For the face step every 6th frame (~5 Hz) is evaluated: Vision face pose,
+///   TrueDepth distance and an exposure-based lux estimate -> `FaceObservation` -> `Guidance.cues`, delivered
+///   with the frame's host-clock time (monotonic). `record` then plans the ISO from the converged auto exposure
+///   (`ExposurePlanner`), locks everything through `CameraConfigurator` (read back) and records.
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoDataOutputSampleBufferDelegate,
                             AVCaptureDepthDataOutputDelegate, @unchecked Sendable {
+    /// One recorder for the app (main flow and repeat flow share the camera).
+    static let shared = CameraRecorder()
+
     static let averageBitRate = 25_000_000
     static let exposureMs = 10.0              // 1/100 s: 50 Hz mains flicker
     static let faceDetectEveryNFrames = 15    // 0.5 s at 30 fps
@@ -58,6 +66,22 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     // videoQueue state
     private var active: ActiveRecording?
     private var latestDepth: AVDepthData?
+    private var positioning: Positioning?
+
+    /// Positioning (videoQueue): guidance callback and what the lux estimate needs.
+    private final class Positioning {
+        let token = UUID()
+        let role: CameraRole
+        let device: AVCaptureDevice
+        let onGuidance: ([GuidanceCue], Double) -> Void
+        var frameIndex = 0
+        init(role: CameraRole, device: AVCaptureDevice, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+            self.role = role; self.device = device; self.onGuidance = onGuidance
+        }
+    }
+    static let positioningEveryNFrames = 6   // ~5 Hz at 30 fps
+
+    var previewSession: AVCaptureSession? { session }
 
     private struct Configured {
         let settings: AppliedCameraSettings
@@ -118,6 +142,31 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
 
     // MARK: CaptureCameraProviding
 
+    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+        let role: CameraRole
+        switch step {
+        case .neutralFace: role = .frontFace
+        case .fingertipPPG: role = .rearFingertip
+        case .ocularCapture, .dorsalTongue: return
+        }
+        sessionQueue.async { [self] in
+            guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
+                  (try? prepareOnSessionQueue(role: role)) != nil, let dev = device else { return }
+            setAutoModes(dev)
+            let p = Positioning(role: role, device: dev, onGuidance: onGuidance)
+            videoQueue.async { [self] in positioning = p }
+        }
+    }
+
+    /// Positioning: let auto exposure, white balance and focus converge (they are locked again by `configure`).
+    private func setAutoModes(_ dev: AVCaptureDevice) {
+        guard (try? dev.lockForConfiguration()) != nil else { return }
+        defer { dev.unlockForConfiguration() }
+        if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
+        if dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { dev.whiteBalanceMode = .continuousAutoWhiteBalance }
+        if dev.isFocusModeSupported(.continuousAutoFocus) { dev.focusMode = .continuousAutoFocus }
+    }
+
     func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording {
         let role: CameraRole
@@ -129,6 +178,9 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
         // Class B capture directory or no recording at all (no fallback location).
         guard let storage = CaptureStorage.shared else { throw RecorderError.notReady("captureStorage") }
         try await ensurePermission()
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            videoQueue.async { [self] in positioning = nil; c.resume() }   // guidance ends when recording starts
+        }
         let configured = try await configure(role: role)
         guard rec.isCurrent(token: rec.token) else { throw RecorderError.cancelled }   // paused while configuring
         let url = storage.captureDirectory.appendingPathComponent("\(rec.token.uuidString.lowercased()).mov")
@@ -161,7 +213,7 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     }
 
     func stop() {
-        videoQueue.async { [self] in failActive(RecorderError.cancelled) }
+        videoQueue.async { [self] in positioning = nil; failActive(RecorderError.cancelled) }
         sessionQueue.async { [self] in
             torchOff()
             if session.isRunning { session.stopRunning() }
@@ -190,6 +242,25 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     }
 
     private func configureOnSessionQueue(role: CameraRole) throws -> Configured {
+        try prepareOnSessionQueue(role: role)
+        guard let dev = device else { throw RecorderError.cameraUnavailable }
+        // I1: keep the brightness auto exposure converged on during positioning at the locked 10 ms.
+        let isoRange = dev.activeFormat.minISO...dev.activeFormat.maxISO
+        let plannedISO = ExposurePlanner.iso(currentISO: dev.iso,
+                                             currentDurationMs: CMTimeGetSeconds(dev.exposureDuration) * 1000,
+                                             targetDurationMs: Self.exposureMs, isoRange: isoRange)
+        let control = AVCaptureDeviceControl(device: dev, connection: videoOutput.connection(with: .video))
+        do {
+            let settings = try CameraConfigurator().configure(control, role: role, preferExposureMs: Self.exposureMs,
+                                                              targetISO: plannedISO)
+            return Configured(settings: settings, aperture: Double(dev.lensAperture))
+        } catch {
+            throw RecorderError.notReady(String(describing: error))
+        }
+    }
+
+    /// Inputs, outputs, format and rotation for `role`; starts the session. Session queue only.
+    private func prepareOnSessionQueue(role: CameraRole) throws {
         if self.role != role || device == nil {
             torchOff()
             let dev: AVCaptureDevice?
@@ -235,13 +306,10 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
             self.role = role
         }
         if !session.isRunning { session.startRunning() }
-        guard let dev = device else { throw RecorderError.cameraUnavailable }
-        let control = AVCaptureDeviceControl(device: dev, connection: videoOutput.connection(with: .video))
-        do {
-            let settings = try CameraConfigurator().configure(control, role: role, preferExposureMs: Self.exposureMs)
-            return Configured(settings: settings, aperture: Double(dev.lensAperture))
-        } catch {
-            throw RecorderError.notReady(String(describing: error))
+        if role == .rearFingertip, let dev = device, dev.hasTorch, dev.torchMode == .off,
+           (try? dev.lockForConfiguration()) != nil {
+            try? dev.setTorchModeOn(level: CameraConfigurator.torchMinLevel)   // positioning the finger needs light
+            dev.unlockForConfiguration()
         }
     }
 
@@ -316,6 +384,10 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        if output === videoOutput, active == nil, let p = positioning {
+            position(p, sampleBuffer)
+            return
+        }
         guard output === videoOutput, let a = active, a.rec.isCurrent(token: a.token),
               let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -378,6 +450,40 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         // A dropped frame leaves a gap in the trace timestamps; FrameTimingQC judges it.
+    }
+
+    /// I1: one guidance evaluation for the face step (every `positioningEveryNFrames`th frame).
+    private func position(_ p: Positioning, _ sampleBuffer: CMSampleBuffer) {
+        guard p.role == .frontFace, let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        p.frameIndex += 1
+        guard p.frameIndex % Self.positioningEveryNFrames == 0 else { return }
+        let t = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))   // host clock: monotonic
+        let width = CVPixelBufferGetWidth(pixels), height = CVPixelBufferGetHeight(pixels)
+        guard let face = detectFace(pixels, width: width, height: height) else {
+            p.onGuidance([.centreFace], t)   // no face: keep the whole face in the oval
+            return
+        }
+        var luma: Double?
+        CVPixelBufferLockBaseAddress(pixels, .readOnly)
+        if let base = CVPixelBufferGetBaseAddress(pixels) {
+            let bpr = CVPixelBufferGetBytesPerRow(pixels)
+            let region = BGRAPixelRegion(base: UnsafeRawBufferPointer(start: base, count: bpr * height), width: width,
+                                         height: height, bytesPerRow: bpr, rects: face.rects, step: Self.faceROIStride)
+            let s = ROITraceBuilder.faceSample(pixels: region, pts: t)
+            if s.roiValid { luma = 0.299 * s.meanR + 0.587 * s.meanG + 0.114 * s.meanB }
+        }
+        CVPixelBufferUnlockBaseAddress(pixels, .readOnly)
+        let dev = p.device
+        let lux = luma.flatMap {
+            LuxEstimator.estimate(meanLuma: $0, exposureSeconds: CMTimeGetSeconds(dev.exposureDuration),
+                                  iso: Double(dev.iso), aperture: Double(dev.lensAperture))
+        } ?? .nan
+        let u = Double(face.bbox.midX), v = 1 - Double(face.bbox.midY)
+        let obs = FaceObservation(yawDeg: face.yawDeg, pitchDeg: face.pitchDeg, rollDeg: face.rollDeg,
+                                  faceWidthFraction: Double(face.bbox.width), distanceCm: depthCm(atRotatedU: u, v: v),
+                                  estimatedLux: lux, landmarkJitter: 0,
+                                  faceCentreOffset: FaceCentreOffset(dx: u - 0.5, dy: v - 0.5))
+        p.onGuidance(Guidance.cues(for: obs, backlit: false), t)
     }
 
     private func startWriter(_ a: ActiveRecording, width: Int, height: Int, at pts: CMTime) throws {

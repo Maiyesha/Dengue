@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import DengueCaptureCore
 
 /// One finished recording attempt.
@@ -19,6 +20,12 @@ struct StepRecording {
 
 /// Source of per-step recordings: `CameraRecorder` in production, `FakeCamera` for UI tests.
 protocol CaptureCameraProviding: AnyObject {
+    /// I1 positioning: preview running with auto exposure / white balance / focus. For the face step the camera
+    /// evaluates Vision + TrueDepth + lux into `Guidance` cues (~5 Hz) and calls `onGuidance(cues, monotonicSeconds)`
+    /// on any queue. Idempotent per step; replaced by the next call; ended by `record` or `stop`.
+    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void)
+    /// Session for `AVCaptureVideoPreviewLayer` (nil for the UI-test fake).
+    var previewSession: AVCaptureSession? { get }
     /// Records the step for `seconds` under `rec`'s token. `positioning` is the face step's summary, reused by
     /// the fingertip step's metadata. `onTick` fires about once per second (any queue).
     /// Throws if cancelled (pause / interruption) or the camera is not ready; the partial file is then deleted.
@@ -32,6 +39,16 @@ protocol CaptureCameraProviding: AnyObject {
 
 /// Used when UITEST_FAKE_CAMERA=1: emits a synthetic plausible trace instantly, no video, nothing sealed.
 final class FakeCamera: CaptureCameraProviding {
+    var previewSession: AVCaptureSession? { nil }
+
+    /// Face step: reports `[.ready]` for 2 s straight away so the positioning gate opens in UI tests.
+    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+        guard step == .neutralFace else { return }
+        let t = ProcessInfo.processInfo.systemUptime
+        onGuidance([.ready], t)
+        onGuidance([.ready], t + CaptureFlow.positioningHoldSeconds)
+    }
+
     func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording {
         let fps = 30.0
