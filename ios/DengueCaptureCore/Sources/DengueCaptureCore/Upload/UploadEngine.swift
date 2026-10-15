@@ -105,6 +105,14 @@ public final class UploadEngine {
         withRecords { try? sessions.load(sessionId) }
     }
 
+    /// Sealed artefacts the engine still owns (files and keys not yet destroyed), for the relaunch sweep.
+    /// nil when the session records cannot be read: the caller must then not delete anything.
+    public func referencedArtefacts() -> [SealedArtefact]? {
+        guard let recs = (withRecords { try? sessions.loadAll() }) else { return nil }
+        return recs.filter { !$0.localDataDestroyed }
+            .flatMap { $0.artefacts.filter { $0.status != .abandoned }.map { $0.sealed } }
+    }
+
     // MARK: launch
 
     /// Call at app launch (after the device token is renewed if due): recovers interrupted items, finishes

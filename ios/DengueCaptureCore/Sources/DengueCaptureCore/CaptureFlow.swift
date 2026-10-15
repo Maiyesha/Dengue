@@ -35,7 +35,7 @@ public enum VitalsSkipReason: CaseIterable, Equatable {
 
 public enum ThermalLevel: Equatable { case nominal, fair, serious, critical }
 
-public enum VitalField: CaseIterable, Hashable {
+public enum VitalField: String, Codable, CaseIterable, Hashable {
     case hr, spo2, sbp, dbp, tempC, rr, crtS
 
     /// Spec 6.5 plausibility ranges. Values outside are flagged and need confirmation.
@@ -64,7 +64,7 @@ public enum VitalField: CaseIterable, Hashable {
     }
 }
 
-public enum VitalSourceDevice: String, CaseIterable, Equatable {
+public enum VitalSourceDevice: String, Codable, CaseIterable, Equatable {
     case bedsideMonitor = "bedside_monitor"
     case pulseOximeter = "pulse_oximeter"
     case thermometer
@@ -108,7 +108,7 @@ public struct VitalEntry: Equatable {
     }
 }
 
-public struct VitalRecord: Equatable {
+public struct VitalRecord: Codable, Equatable {
     public var field: VitalField
     public var value: Double
     public var source: VitalSourceDevice

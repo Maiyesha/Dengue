@@ -1,4 +1,4 @@
-public enum StepVerdict: Equatable {
+public enum StepVerdict: Codable, Equatable {
     case accept
     case recapture([ReasonCode])
     case unableToAcquire([ReasonCode])
@@ -6,7 +6,7 @@ public enum StepVerdict: Equatable {
 
 /// One consumed attempt and its effective device verdict (an exhausted recapture is logged as unableToAcquire).
 /// Paused / interrupted attempts are not consumed and not logged.
-public struct AttemptRecord: Equatable {
+public struct AttemptRecord: Codable, Equatable {
     public var step: CaptureStep
     public var attempt: Int
     public var verdict: StepVerdict

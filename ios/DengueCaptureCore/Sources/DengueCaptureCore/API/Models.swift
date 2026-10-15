@@ -115,13 +115,14 @@ public struct ScanMetadata: Codable, Equatable {
     public var distanceCm: Double
     public var angleDeg: Double
     public var lightingLux: Double
-    public var ambientTempC: Double
-    public var ambientHumidityPct: Double
+    /// Optional: only when entered (spec section 9; T13 contract ruling).
+    public var ambientTempC: Double?
+    public var ambientHumidityPct: Double?
     public var mount: String
     public var lightingType: String
     public var exposureDurationMs: Double
     public init(cameraModel: String, frameRate: Double, resolution: String, exposure: Double, distanceCm: Double,
-                angleDeg: Double, lightingLux: Double, ambientTempC: Double, ambientHumidityPct: Double,
+                angleDeg: Double, lightingLux: Double, ambientTempC: Double?, ambientHumidityPct: Double?,
                 mount: String, lightingType: String, exposureDurationMs: Double) {
         self.cameraModel = cameraModel; self.frameRate = frameRate; self.resolution = resolution
         self.exposure = exposure; self.distanceCm = distanceCm; self.angleDeg = angleDeg

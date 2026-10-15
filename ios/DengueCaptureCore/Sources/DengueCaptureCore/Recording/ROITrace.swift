@@ -2,7 +2,9 @@ import Foundation
 
 /// One video frame's ROI colour statistics, taken from the uncompressed camera buffer (before HEVC).
 ///
-/// An empty ROI (e.g. no face found) gives an all-zero sample, which the pulse gate treats as unusable.
+/// A frame without a usable ROI (no face for more than `FaceROITracker.holdSeconds`, or an empty ROI) stays in the
+/// trace with `roiValid == false` and zero means, so frame timing remains complete; the quality gate excludes it
+/// from the pulse check and counts it towards DS_QG_003.
 public struct FrameSample: Codable, Equatable {
     /// Presentation timestamp, seconds.
     public var pts: Double
@@ -12,15 +14,34 @@ public struct FrameSample: Codable, Equatable {
     public var lumaStdDev: Double
     /// Fraction of ROI pixels whose red channel is saturated (== 255).
     public var fractionRClipped: Double
+    /// False when the frame had no usable ROI (encoded as `roi_valid`; absent in older traces means true).
+    public var roiValid: Bool
 
-    public init(pts: Double, meanR: Double, meanG: Double, meanB: Double, lumaStdDev: Double, fractionRClipped: Double) {
+    public init(pts: Double, meanR: Double, meanG: Double, meanB: Double, lumaStdDev: Double, fractionRClipped: Double,
+                roiValid: Bool = true) {
         self.pts = pts; self.meanR = meanR; self.meanG = meanG; self.meanB = meanB
-        self.lumaStdDev = lumaStdDev; self.fractionRClipped = fractionRClipped
+        self.lumaStdDev = lumaStdDev; self.fractionRClipped = fractionRClipped; self.roiValid = roiValid
+    }
+
+    /// A frame with no usable ROI.
+    public static func invalid(pts: Double) -> FrameSample {
+        FrameSample(pts: pts, meanR: 0, meanG: 0, meanB: 0, lumaStdDev: 0, fractionRClipped: 0, roiValid: false)
     }
 
     enum CodingKeys: String, CodingKey {
         case pts, meanR = "mean_r", meanG = "mean_g", meanB = "mean_b"
-        case lumaStdDev = "luma_std", fractionRClipped = "frac_r_clipped"
+        case lumaStdDev = "luma_std", fractionRClipped = "frac_r_clipped", roiValid = "roi_valid"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pts = try c.decode(Double.self, forKey: .pts)
+        meanR = try c.decode(Double.self, forKey: .meanR)
+        meanG = try c.decode(Double.self, forKey: .meanG)
+        meanB = try c.decode(Double.self, forKey: .meanB)
+        lumaStdDev = try c.decode(Double.self, forKey: .lumaStdDev)
+        fractionRClipped = try c.decode(Double.self, forKey: .fractionRClipped)
+        roiValid = try c.decodeIfPresent(Bool.self, forKey: .roiValid) ?? true
     }
 
     public var stats: FrameStats {
@@ -54,14 +75,34 @@ public enum ROITraceBuilder {
             let y = 0.299 * Double(p.r) + 0.587 * Double(p.g) + 0.114 * Double(p.b)
             sy += y; syy += y * y
         }
-        guard n > 0 else {
-            return FrameSample(pts: pts, meanR: 0, meanG: 0, meanB: 0, lumaStdDev: 0, fractionRClipped: 0)
-        }
+        guard n > 0 else { return .invalid(pts: pts) }
         let d = Double(n)
         let my = sy / d
         let variance = max(0, syy / d - my * my)
         return FrameSample(pts: pts, meanR: Double(sr) / d, meanG: Double(sg) / d, meanB: Double(sb) / d,
                            lumaStdDev: variance.squareRoot(), fractionRClipped: Double(clipped) / d)
+    }
+}
+
+/// Keeps the last good face ROI rects across missed detections for up to `holdSeconds`.
+public struct FaceROITracker {
+    public static let holdSeconds = 1.5
+    private var last: [PixelRect] = []
+    private var lastGoodAt: Double?
+
+    public init() {}
+
+    /// A detection result at `pts`; empty means the face was missed (the previous rects are kept).
+    public mutating func detected(_ rects: [PixelRect], at pts: Double) {
+        guard !rects.isEmpty else { return }
+        last = rects
+        lastGoodAt = pts
+    }
+
+    /// The rects to use at `pts`, or nil when there was no good detection within `holdSeconds`.
+    public func rects(at pts: Double) -> [PixelRect]? {
+        guard let t = lastGoodAt, pts - t <= Self.holdSeconds + 1e-9 else { return nil }
+        return last
     }
 }
 
@@ -146,6 +187,14 @@ public struct ROITrace: Codable, Equatable {
 
     public var rgb: [RGBSample] { samples.map { RGBSample(r: $0.meanR, g: $0.meanG, b: $0.meanB) } }
     public var timestamps: [Double] { samples.map { $0.pts } }
+    /// RGB of the samples with a valid ROI only (pulse-check input).
+    public var validRGB: [RGBSample] {
+        samples.filter { $0.roiValid }.map { RGBSample(r: $0.meanR, g: $0.meanG, b: $0.meanB) }
+    }
+    /// Fraction of samples without a valid ROI (0 for an empty trace).
+    public var invalidFraction: Double {
+        samples.isEmpty ? 0 : Double(samples.filter { !$0.roiValid }.count) / Double(samples.count)
+    }
 
     /// Per-field median over all samples (used for fingertip coverage).
     public var medianStats: FrameStats {
@@ -176,22 +225,28 @@ public struct ROITrace: Codable, Equatable {
     }
 }
 
-/// On-device provisional verdict for one recorded attempt. Order: frame timing (DS_QG_004), pulse plausibility
-/// (face and fingertip), fingertip coverage (fingertip only, on the median FrameStats). Every failing reason is
+/// On-device provisional verdict for one recorded attempt. Order: frame timing (DS_QG_004, over all frames), ROI
+/// occlusion (DS_QG_003 when more than 10% of frames have no valid ROI), pulse plausibility on the valid frames
+/// only (face and fingertip), fingertip coverage (fingertip only, on the median FrameStats). Every failing reason is
 /// collected; the first is the one shown to the nurse. No pulse rate is ever produced (spec section 8).
 public struct StepQualityInput {
+    public static let maxInvalidROIFraction = 0.10
     public var trace: ROITrace
     public var config: StepConfig
 
     public init(trace: ROITrace, config: StepConfig) { self.trace = trace; self.config = config }
+
+    /// What the pulse gate sees: valid-ROI samples only.
+    var pulseInput: [RGBSample] { trace.validRGB }
 
     public func verdict() -> StepVerdict {
         var reasons: [ReasonCode] = []
         let timing = FrameTimingQC.evaluate(timestamps: trace.timestamps, nominalFPS: trace.fps,
                                             minimumSeconds: config.minimumSeconds)
         if let r = timing.reason { reasons.append(r) }
+        if trace.invalidFraction > Self.maxInvalidROIFraction { reasons.append(.dsQG003) }
         if config.step == .neutralFace || config.step == .fingertipPPG {
-            let pulse = PulsePlausibility.evaluate(trace: trace.rgb, fps: trace.fps)
+            let pulse = PulsePlausibility.evaluate(trace: pulseInput, fps: trace.fps)
             if let r = pulse.reason { reasons.append(r) }
         }
         if config.step == .fingertipPPG {
@@ -199,5 +254,57 @@ public struct StepQualityInput {
             if let r = cover.reason { reasons.append(r) }
         }
         return reasons.isEmpty ? .accept : .recapture(reasons)
+    }
+}
+
+/// distance_cm / angle_deg / lighting_lux for the capture metadata: medians over the face-step observations.
+/// Non-finite values and missing depth are ignored; a field is nil when nothing usable was observed.
+public struct PositioningSummary: Codable, Equatable {
+    public var distanceCm: Double?
+    /// Median yaw, degrees.
+    public var angleDeg: Double?
+    public var lux: Double?
+
+    public init(distanceCm: Double?, angleDeg: Double?, lux: Double?) {
+        self.distanceCm = distanceCm; self.angleDeg = angleDeg; self.lux = lux
+    }
+
+    public static func from(_ obs: [FaceObservation]) -> PositioningSummary {
+        PositioningSummary(distanceCm: median(obs.compactMap { $0.distanceCm }),
+                           angleDeg: median(obs.map { $0.yawDeg }),
+                           lux: median(obs.map { $0.estimatedLux }))
+    }
+
+    static func median(_ values: [Double]) -> Double? {
+        let v = values.filter { $0.isFinite }.sorted()
+        guard !v.isEmpty else { return nil }
+        return v.count % 2 == 1 ? v[v.count / 2] : (v[v.count / 2 - 1] + v[v.count / 2]) / 2
+    }
+}
+
+/// Provisional scene illuminance from the camera exposure (reflected-light meter equation).
+///
+/// L = K * N^2 / (t * S) * (Y_lin / 0.18), with K = 12.5 cd/m^2 and Y_lin the sRGB-linearised mean ROI luma;
+/// E = pi * L / rho with an assumed reflectance rho = 0.18. An estimate for the >= 200 lx gate, not a lux meter.
+public enum LuxEstimator {
+    public static let k = 12.5
+    public static let reflectance = 0.18
+
+    public static func estimate(meanLuma: Double, exposureSeconds: Double, iso: Double, aperture: Double) -> Double? {
+        guard meanLuma.isFinite, meanLuma > 0, exposureSeconds.isFinite, exposureSeconds > 0,
+              iso.isFinite, iso > 0, aperture.isFinite, aperture > 0 else { return nil }
+        let v = min(meanLuma, 255) / 255
+        let linear = v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        let luminance = k * aperture * aperture / (exposureSeconds * iso) * (linear / 0.18)
+        return Double.pi * luminance / reflectance
+    }
+}
+
+public extension CaptureMetadata {
+    /// Applies measured positioning values (the fingertip step reuses the face step's summary).
+    func withPositioning(_ s: PositioningSummary) -> CaptureMetadata {
+        var m = self
+        m.distanceCm = s.distanceCm; m.angleDeg = s.angleDeg; m.lux = s.lux
+        return m
     }
 }

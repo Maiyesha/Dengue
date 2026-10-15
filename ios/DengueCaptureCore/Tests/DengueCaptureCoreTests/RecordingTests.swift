@@ -72,7 +72,8 @@ final class RecordingTests: XCTestCase {
 
     func testEmptyROIGivesZeroSample() {
         let s = ROITraceBuilder.faceSample(pixels: [Px](), pts: 3)
-        XCTAssertEqual(s, FrameSample(pts: 3, meanR: 0, meanG: 0, meanB: 0, lumaStdDev: 0, fractionRClipped: 0))
+        XCTAssertEqual(s, FrameSample.invalid(pts: 3))
+        XCTAssertFalse(s.roiValid)
     }
 
     func testBGRARegionReadsOnlyTheRectsWithStride() {
@@ -247,9 +248,9 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(s.exposureDurationMs, 10)
         XCTAssertEqual(s.exposure, 0.01, accuracy: 1e-12)
         XCTAssertEqual(s.lightingLux, 320)
-        m.distanceCm = nil; m.ambientTempC = nil
+        m.distanceCm = nil; m.lux = nil
         XCTAssertThrowsError(try CaptureHandoff.scanMetadata(from: m)) { e in
-            XCTAssertEqual(e as? CaptureHandoffError, .metadataIncomplete(["distance_cm", "ambient_temp_c"]))
+            XCTAssertEqual(e as? CaptureHandoffError, .metadataIncomplete(["distance_cm", "lighting_lux"]))
         }
     }
 
@@ -331,7 +332,10 @@ final class RecordingTests: XCTestCase {
         let engine = UploadEngine(outbox: outbox, api: FakeUploadAPI(log: EventLog()), sessions: sessions,
                                   keys: InMemoryKeyStore(), uploader: FakePartUploader(log: EventLog()),
                                   notifier: FakeNotifier())
-        try plan.enqueue(on: engine, participantCode: "DS-2026-00417")
+        try engine.enqueueSession(sessionId: plan.sessionId, participantCode: "DS-2026-00417",
+                                  createScan: plan.createScan, scanId: nil, artefacts: plan.artefacts)
+        try engine.enqueueClinicalData(sessionId: plan.sessionId, patientId: plan.patientId,
+                                       request: try XCTUnwrap(plan.clinicalData))
 
         let items = try outbox.items(sessionId: session)
         let create = try XCTUnwrap(items.first { $0.kind == .createScan })
@@ -346,15 +350,15 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(video.sealed.sealedSizeBytes, 141)
     }
 
-    func testHandoffAcceptedStepMissingAKindThrows() {
+    func testHandoffAcceptedStepMissingAKindUploadsTheRest() throws {
         let attempts = [AttemptRecord(step: .neutralFace, attempt: 1, verdict: .accept)]
         let artefacts = Array(stepArtefacts(.neutralFace, 1).prefix(2))
-        XCTAssertThrowsError(try CaptureHandoff().makeSessionPlan(
+        let plan = try CaptureHandoff().makeSessionPlan(
             sessionId: UUID(), patientId: UUID(), capturedAt: Date(), offline: false, protocolVersion: "p",
             metadata: try CaptureHandoff.scanMetadata(from: sampleMetadata(step: .neutralFace, attempt: 1)),
-            attempts: attempts, vitals: [], artefacts: artefacts)) { e in
-            XCTAssertEqual(e as? CaptureHandoffError, .missingArtefact(step: .neutralFace, attempt: 1, kind: .metadata))
-        }
+            attempts: attempts, vitals: [], artefacts: artefacts)
+        XCTAssertEqual(plan.artefacts.map { $0.kind }, [.video, .roiTrace])
+        XCTAssertEqual(plan.incompleteSteps, [.neutralFace])
     }
 
     func testHandoffUnableToAcquireStepUploadsNothingButReportsAttempts() throws {

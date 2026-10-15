@@ -1,7 +1,7 @@
 import Foundation
 
 /// One sealed artefact of one recorded attempt.
-public struct SealedStepArtefact: Equatable {
+public struct SealedStepArtefact: Codable, Equatable {
     public var step: CaptureStep
     public var attempt: Int
     public var kind: ArtefactKind
@@ -11,15 +11,35 @@ public struct SealedStepArtefact: Equatable {
     }
 }
 
+/// Why a hand-off could not be enqueued (all recoverable: the hand-off is HELD, never shredded).
 public enum CaptureHandoffError: Error, Equatable {
-    /// An accepted attempt lacks one of video / roi_trace / metadata.
-    case missingArtefact(step: CaptureStep, attempt: Int, kind: ArtefactKind)
-    /// createScan metadata fields the contract requires but that were not measured or entered (wire names).
-    case metadataIncomplete([String])
     case noAttempts
+    /// createScan metadata fields the contract requires but that were not measured (wire names).
+    case metadataIncomplete([String])
+    case patientUnknown
+    /// No upload engine (e.g. MDM `api_base_url` not provisioned yet).
+    case uploadNotConfigured
+    /// Local outbox write failed; carries only the error's type name.
+    case enqueueFailed(String)
+
+    /// PHI-free diagnostic for logs and the outbox screen's engineering detail.
+    public var diagnostic: String {
+        switch self {
+        case .noAttempts: return "HANDOFF_NO_ATTEMPTS"
+        case .metadataIncomplete(let f): return "HANDOFF_METADATA_INCOMPLETE:" + f.joined(separator: ",")
+        case .patientUnknown: return "HANDOFF_PATIENT_UNKNOWN"
+        case .uploadNotConfigured: return "HANDOFF_UPLOAD_NOT_CONFIGURED"
+        case .enqueueFailed(let t): return "HANDOFF_ENQUEUE_FAILED:" + t
+        }
+    }
+
+    /// Only the error's type name: never its description, which could echo payload content.
+    public static func enqueueFailed(_ error: Error) -> CaptureHandoffError {
+        .enqueueFailed(String(describing: type(of: error)))
+    }
 }
 
-/// What one finished capture session hands to the upload engine.
+/// What one finished capture session hands to the upload engine (enqueued by `CaptureHandoffService`).
 public struct CaptureSessionPlan {
     public var sessionId: UUID
     public var patientId: UUID
@@ -27,19 +47,12 @@ public struct CaptureSessionPlan {
     public var createScan: CreateScanRequest
     /// Reference vitals (nil when none were entered).
     public var clinicalData: ClinicalDataRequest?
-    /// declare / upload / complete per artefact: video, roi_trace and metadata of each ACCEPTED attempt.
+    /// declare / upload / complete per artefact of each ACCEPTED attempt (whatever kinds were sealed).
     public var artefacts: [ArtefactUpload]
+    /// Accepted steps with fewer than three sealed artefacts (e.g. a seal failed): uploaded as partial.
+    public var incompleteSteps: [CaptureStepName]
     /// Sealed artefacts of attempts that were not accepted. Not uploaded: the caller destroys their keys and files.
     public var discarded: [SealedArtefact]
-
-    /// Registers the session (createScan first; every artefact's declare depends on it), then the clinical data.
-    public func enqueue(on engine: UploadEngine, participantCode: String) throws {
-        try engine.enqueueSession(sessionId: sessionId, participantCode: participantCode, createScan: createScan,
-                                  scanId: nil, artefacts: artefacts)
-        if let clinicalData {
-            try engine.enqueueClinicalData(sessionId: sessionId, patientId: patientId, request: clinicalData)
-        }
-    }
 }
 
 /// Maps a finished capture (attempt log, vitals, sealed artefacts) onto the `UploadEngine` enqueue API.
@@ -64,10 +77,14 @@ public struct CaptureHandoff {
 
         let accepted = attempts.filter { $0.verdict == .accept }
         var uploads: [ArtefactUpload] = []
+        var incomplete: [CaptureStepName] = []
         for a in accepted {
             for kind in Self.artefactKinds {
                 guard let s = artefacts.first(where: { $0.step == a.step && $0.attempt == a.attempt && $0.kind == kind })
-                else { throw CaptureHandoffError.missingArtefact(step: a.step, attempt: a.attempt, kind: kind) }
+                else {
+                    if !incomplete.contains(Self.name(a.step)) { incomplete.append(Self.name(a.step)) }
+                    continue
+                }
                 uploads.append(ArtefactUpload(localId: makeId(), step: Self.name(a.step), attempt: a.attempt,
                                               kind: kind, deviceVerdict: .accept, sealed: s.sealed))
             }
@@ -83,7 +100,7 @@ public struct CaptureHandoff {
         return CaptureSessionPlan(
             sessionId: sessionId, patientId: patientId, createScan: createScan,
             clinicalData: observations.isEmpty ? nil : ClinicalDataRequest(observations: observations),
-            artefacts: uploads, discarded: discarded)
+            artefacts: uploads, incompleteSteps: incomplete, discarded: discarded)
     }
 
     public static func deviceAttempt(_ r: AttemptRecord) -> DeviceAttempt {
@@ -99,23 +116,21 @@ public struct CaptureHandoff {
         }
     }
 
-    /// createScan `metadata` from a recorded attempt's capture metadata. The contract requires distance, angle,
-    /// lux and ambient temperature/humidity; any that were not measured/entered are reported, never invented.
+    /// createScan `metadata` from a recorded attempt's capture metadata. The contract requires the measured
+    /// distance, angle and lux; any that were not measured are reported (the hand-off is then held), never
+    /// invented. Ambient temperature/humidity are optional (only when entered).
     public static func scanMetadata(from m: CaptureMetadata) throws -> ScanMetadata {
         var missing: [String] = []
         if m.distanceCm == nil { missing.append("distance_cm") }
         if m.angleDeg == nil { missing.append("angle_deg") }
         if m.lux == nil { missing.append("lighting_lux") }
-        if m.ambientTempC == nil { missing.append("ambient_temp_c") }
-        if m.ambientHumidityPct == nil { missing.append("ambient_humidity_pct") }
-        guard missing.isEmpty, let d = m.distanceCm, let a = m.angleDeg, let l = m.lux,
-              let t = m.ambientTempC, let h = m.ambientHumidityPct else {
+        guard missing.isEmpty, let d = m.distanceCm, let a = m.angleDeg, let l = m.lux else {
             throw CaptureHandoffError.metadataIncomplete(missing)
         }
         return ScanMetadata(cameraModel: m.deviceModel, frameRate: m.fps, resolution: m.resolution,
                             exposure: m.exposureDurationMs / 1000, distanceCm: d, angleDeg: a, lightingLux: l,
-                            ambientTempC: t, ambientHumidityPct: h, mount: m.mount, lightingType: m.lightingType,
-                            exposureDurationMs: m.exposureDurationMs)
+                            ambientTempC: m.ambientTempC, ambientHumidityPct: m.ambientHumidityPct, mount: m.mount,
+                            lightingType: m.lightingType, exposureDurationMs: m.exposureDurationMs)
     }
 
     /// Seals `input` to `output` and deletes the plaintext on success. On failure the plaintext is left for the

@@ -103,6 +103,10 @@ public enum NurseCopy {
     public static let stepNameEye = "Eye"
     public static let stepNameTongue = "Tongue"
     public static let outboxEmpty = "Nothing waiting to upload"
+    /// Outbox row for a held hand-off (kept on the phone until it can be queued for upload).
+    public static let heldWaiting = "Saved on this phone. Waiting to send."
+    public static let buttonDeleteRecording = "Delete this recording"
+    public static let confirmDeleteRecording = "Delete this recording from the phone? It cannot be recovered."
     public static let noteMonitorHR = "Note the monitor heart rate now"
     public static let sourceBedsideMonitor = "Bedside monitor"
     public static let sourcePulseOximeter = "Pulse oximeter"
@@ -181,7 +185,8 @@ public enum NurseCopy {
             buttonContinue, buttonAgree, buttonDecline, buttonStart, buttonPause, buttonSkip, buttonDone,
             buttonNextPatient, titleOutbox, labelSkipReason, labelHeartRate, labelSpO2, labelRespRate,
             labelTemperature, labelCapRefill, labelSystolic, labelDiastolic, stepNameFace,
-            stepNameFingertip, stepNameEye, stepNameTongue, outboxEmpty,
+            stepNameFingertip, stepNameEye, stepNameTongue, outboxEmpty, heldWaiting, buttonDeleteRecording,
+            confirmDeleteRecording,
             noteMonitorHR, sourceBedsideMonitor, sourcePulseOximeter, sourceThermometer,
             sourceManualSphygmomanometer, sourceOther, labelSource, labelMeasuredAt, vitalUnparseable,
             vitalOutOfRange, vitalConfirm, buttonOutbox, buttonOK,

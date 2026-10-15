@@ -11,6 +11,12 @@ public protocol KeyStore {
     func destroy(id: String) throws
 }
 
+/// A key store that can list its artefact key ids (for the relaunch sweep). Implementations must list ONLY
+/// per-artefact keys, never wrapping keys or other items.
+public protocol KeyEnumerating {
+    func allKeyIds() throws -> [String]
+}
+
 /// NOT FOR PRODUCTION. Keys live only in process memory and are not protected by the
 /// Keychain or Secure Enclave. Intended for unit tests and SwiftUI previews.
 public final class InMemoryKeyStore: KeyStore {
@@ -36,5 +42,18 @@ public final class InMemoryKeyStore: KeyStore {
     public func destroy(id: String) throws {
         lock.lock(); defer { lock.unlock() }
         keys[id] = nil
+    }
+
+    /// Tests: a key under an arbitrary id.
+    public func insertForTesting(id: String) {
+        lock.lock(); defer { lock.unlock() }
+        keys[id] = SymmetricKey(size: .bits256)
+    }
+}
+
+extension InMemoryKeyStore: KeyEnumerating {
+    public func allKeyIds() throws -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(keys.keys)
     }
 }
