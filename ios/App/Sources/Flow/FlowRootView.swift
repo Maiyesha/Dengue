@@ -12,11 +12,11 @@ struct FlowRootView: View {
             case .patientDeclined, .comeBackLater: TerminalMessageView(c: c)
             case .checklist: ChecklistView(c: c)
             case .referenceVitals: ReferenceVitalsView(c: c)
-            case .capture, .blocked: CaptureStepView(c: c)
+            case .capture: CaptureStepView(c: c)
+            case .blocked: BlockedView(c: c)
             case .qualityResult: QualityResultView(c: c)
             case .saved: SavedView(c: c)
             }
         }
-        .id(c.revision)
     }
 }

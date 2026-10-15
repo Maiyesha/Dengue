@@ -3,13 +3,24 @@ import DengueCaptureCore
 
 struct CaptureStepView: View {
     @ObservedObject var c: FlowCoordinator
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         VStack(spacing: 20) {
-            Text(stepName).font(.title2)
+            Text(c.flow.currentStep?.nurseName ?? "").font(.title2)
+            if let status = c.flow.statusMessage {
+                Text(status).font(.headline).accessibilityIdentifier("status-message")
+            }
+            if let reason = c.flow.retryInstruction {
+                Text(reason).accessibilityIdentifier("retry-instruction")
+            }
             if c.flow.currentStep == .fingertipPPG {
                 Text(NurseCopy.fingertipGuidance)
             } else {
                 Text(NurseCopy.holdStillPatient)
+            }
+            if let prompt = c.flow.pendingPrompt {
+                Button(prompt) { c.dismissPrompt() }.accessibilityIdentifier("monitor-prompt")
             }
             if let m = c.blockingMessage { BlockingMessage(text: m) }
             Button(NurseCopy.buttonStart) { c.startCurrentStep() }
@@ -18,31 +29,12 @@ struct CaptureStepView: View {
             Button(NurseCopy.buttonPause) { c.pause() }.accessibilityIdentifier("pause-button")
         }
         .padding()
-        .onReceive(NotificationCenter.default.publisher(
-            for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
-            switch ProcessInfo.processInfo.thermalState {
-            case .serious: c.thermalChanged(.serious)
-            case .critical: c.thermalChanged(.critical)
-            case .fair: c.thermalChanged(.fair)
-            default: c.thermalChanged(.nominal)
-            }
-        }
-        .onAppear {
-            // UI-test hook: simulate thermal pressure during a recording.
-            if ProcessInfo.processInfo.environment["UITEST_THERMAL_SERIOUS"] == "1" {
-                c.startCurrentStep()
-                c.thermalChanged(.serious)
-            }
-        }
-    }
-
-    private var stepName: String {
-        switch c.flow.currentStep {
-        case .neutralFace?: return NurseCopy.stepNameFace
-        case .fingertipPPG?: return NurseCopy.stepNameFingertip
-        case .ocularCapture?: return NurseCopy.stepNameEye
-        case .dorsalTongue?: return NurseCopy.stepNameTongue
-        case nil: return ""
+        .onAppear { c.syncThermal() }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            .receive(on: DispatchQueue.main)) { _ in c.syncThermal() }
+        // Spec Review Focus 1: lock / app switch mid-recording discards the partial, no attempt consumed.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { c.pause() }
         }
     }
 }

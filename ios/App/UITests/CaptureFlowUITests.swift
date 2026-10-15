@@ -21,12 +21,24 @@ final class CaptureFlowUITests: XCTestCase {
         app.buttons["lookup-button"].tap()
     }
 
+    /// Toggle rows are tapped at the right edge, where the switch control sits.
+    func tickChecklist(_ app: XCUIApplication) {
+        for id in ["resting", "glasses", "light", "holder", "colourCard"] {
+            let row = app.switches["check-\(id)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5))
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        }
+    }
+
+    func label(_ app: XCUIApplication, _ id: String) -> String? {
+        let e = app.staticTexts[id]
+        return e.waitForExistence(timeout: 5) ? e.label : nil
+    }
+
     func reachCapture(_ app: XCUIApplication) {
         lookUp(app)
         app.buttons["assent-agree-button"].tap()
-        for id in ["resting", "glasses", "light", "holder", "colourCard"] {
-            app.switches["check-\(id)"].tap()
-        }
+        tickChecklist(app)
         app.buttons["checklist-continue"].tap()
         let hr = app.textFields["vitals-hr"]
         hr.tap(); hr.typeText("88")
@@ -40,26 +52,26 @@ final class CaptureFlowUITests: XCTestCase {
             app.buttons["start-button"].tap()
         }
         app.buttons["quality-continue"].tap()
-        XCTAssertTrue(app.staticTexts["Recording saved for research"].waitForExistence(timeout: 5))
+        XCTAssertEqual(label(app, "saved-message"), "Recording saved for research")
         XCTAssertTrue(app.staticTexts["monitor-hr"].exists)
     }
 
     func testInvalidConsentShowsConsentBlockedAndNoCaptureButton() {
         let app = launch(["UITEST_CONSENT": "blocked"])
         lookUp(app)
-        XCTAssertTrue(app.staticTexts["No valid study consent on record. Do not record. Contact the study coordinator."]
-            .waitForExistence(timeout: 5))
+        XCTAssertEqual(label(app, "blocking-message"),
+                       "No valid study consent on record. Do not record. Contact the study coordinator.")
         XCTAssertFalse(app.buttons["start-button"].exists)
         XCTAssertFalse(app.buttons["assent-agree-button"].exists)
     }
 
     func testBannerExistsOnEveryScreenInFlow() {
         let app = launch()
-        func assertBanner() { XCTAssertTrue(app.staticTexts[banner].waitForExistence(timeout: 5)) }
+        func assertBanner() { XCTAssertEqual(label(app, "ruo-banner"), banner) }
         assertBanner()
         lookUp(app); assertBanner()
         app.buttons["assent-agree-button"].tap(); assertBanner()
-        for id in ["resting", "glasses", "light", "holder", "colourCard"] { app.switches["check-\(id)"].tap() }
+        tickChecklist(app)
         app.buttons["checklist-continue"].tap(); assertBanner()
         let hr = app.textFields["vitals-hr"]; hr.tap(); hr.typeText("88")
         app.buttons["vitals-continue"].tap(); assertBanner()
@@ -82,15 +94,16 @@ final class CaptureFlowUITests: XCTestCase {
     func testOfflineWithRosterConsentSnapshotOlderThan24hBlocksCapture() {
         let app = launch(["UITEST_CONSENT": "stale"])
         lookUp(app)
-        XCTAssertTrue(app.staticTexts["No valid study consent on record. Do not record. Contact the study coordinator."]
-            .waitForExistence(timeout: 5))
+        XCTAssertEqual(label(app, "blocking-message"),
+                       "No valid study consent on record. Do not record. Contact the study coordinator.")
         XCTAssertFalse(app.buttons["start-button"].exists)
     }
 
     func testThermalSeriousDuringRecordingInterruptsAndShowsPhoneWarm() {
         let app = launch(["UITEST_THERMAL_SERIOUS": "1"])
         reachCapture(app)
-        XCTAssertTrue(app.staticTexts["Phone is warm — wait a minute"].waitForExistence(timeout: 5))
+        app.buttons["start-button"].tap()
+        XCTAssertEqual(label(app, "blocking-message"), "Phone is warm — wait a minute")
         XCTAssertFalse(app.buttons["start-button"].isEnabled)
     }
 }

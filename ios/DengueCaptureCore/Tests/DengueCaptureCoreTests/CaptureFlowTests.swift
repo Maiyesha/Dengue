@@ -28,7 +28,7 @@ final class CaptureFlowTests: XCTestCase {
 
     func flowAtCapture() -> CaptureFlow {
         let f = flowAtVitals()
-        f.enterVitals(ReferenceVitalsInput(hr: 88))
+        f.submitVitals([.hr: VitalEntry(text: "88")], now: now)
         return f
     }
 
@@ -50,7 +50,7 @@ final class CaptureFlowTests: XCTestCase {
         FlowChecklistItem.allCases.forEach { f.setChecklist($0, ticked: true) }
         f.proceedFromChecklist()
         XCTAssertEqual(f.screen, .referenceVitals)
-        f.enterVitals(ReferenceVitalsInput(hr: 88))
+        f.submitVitals([.hr: VitalEntry(text: "88")], now: now)
         XCTAssertEqual(f.screen, .capture)
         XCTAssertEqual(f.currentStep, .neutralFace)
         runStep(f)
@@ -71,7 +71,7 @@ final class CaptureFlowTests: XCTestCase {
         XCTAssertEqual(f.screen, .consent)
         XCTAssertEqual(f.blockingMessage, NurseCopy.consentBlocked)
         XCTAssertFalse(f.canCapture)
-        f.giveAssent(); f.proceedFromChecklist(); f.enterVitals(ReferenceVitalsInput(hr: 80)); f.positioned()
+        f.giveAssent(); f.proceedFromChecklist(); f.submitVitals([.hr: VitalEntry(text: "80")], now: now); f.positioned()
         XCTAssertEqual(f.screen, .consent)
         XCTAssertNil(f.currentStep)
     }
@@ -145,7 +145,7 @@ final class CaptureFlowTests: XCTestCase {
 
     func testVitalsSkippableOnlyWithReason() {
         let f = flowAtVitals()
-        f.enterVitals(ReferenceVitalsInput())
+        f.submitVitals([:], now: now)
         XCTAssertEqual(f.screen, .referenceVitals, "empty vitals do not proceed")
         f.skipVitals(reason: nil)
         XCTAssertEqual(f.screen, .referenceVitals)
@@ -182,7 +182,7 @@ final class CaptureFlowTests: XCTestCase {
         f.giveAssent()
         FlowChecklistItem.allCases.forEach { f.setChecklist($0, ticked: true) }
         f.proceedFromChecklist()
-        f.enterVitals(ReferenceVitalsInput(hr: 80))
+        f.submitVitals([.hr: VitalEntry(text: "80")], now: now)
         XCTAssertEqual(f.screen, .blocked)
         XCTAssertEqual(f.blockingMessage, NurseCopy.lowStorage)
     }

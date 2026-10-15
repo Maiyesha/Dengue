@@ -53,7 +53,32 @@ final class FlowCoordinator: ObservableObject {
             flow: flow, consentSource: FakeConsentSource(mode: "blocked"), camera: FakeCamera())
     }
 
-    private func refresh() { revision += 1 }
+    /// Bumps `revision` only when something a view can show actually changed (no remount loops).
+    private var lastSignature = ""
+    private func refresh() {
+        let sig = flow.stateSignature
+        guard sig != lastSignature else { return }
+        lastSignature = sig
+        revision += 1
+    }
+
+    @Published var showOutbox = false
+    private var injectedThermal = false
+
+    /// Seeds and tracks the OS thermal state (call on appear and from the notification).
+    func syncThermal() {
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious: flow.thermalChanged(.serious)
+        case .critical: flow.thermalChanged(.critical)
+        case .fair: flow.thermalChanged(.fair)
+        default: if !injectedThermal { flow.thermalChanged(.nominal) }
+        }
+        refresh()
+    }
+
+    /// Timer hook (Task 11 calls this while recording); fires the 20 s monitor-HR prompt.
+    func recordingTick(elapsed: Double) { flow.recordingElapsed(elapsed); refresh() }
+    func dismissPrompt() { flow.consumePrompt(); refresh() }
 
     var screen: FlowScreen { flow.screen }
     var blockingMessage: String? { flow.blockingMessage }
@@ -73,11 +98,11 @@ final class FlowCoordinator: ObservableObject {
     func toggle(_ item: FlowChecklistItem, _ on: Bool) { flow.setChecklist(item, ticked: on); refresh() }
     func proceedFromChecklist() { flow.proceedFromChecklist(); refresh() }
     func comeBackLater() { flow.comeBackLater(); refresh() }
-    func enterVitals(_ v: ReferenceVitalsInput) { flow.enterVitals(v); refresh() }
+    func submitVitals(_ e: [VitalField: VitalEntry]) { flow.submitVitals(e, now: Date()); refresh() }
     func skipVitals(_ r: VitalsSkipReason?) { flow.skipVitals(reason: r); refresh() }
     func pause() { flow.pause(); refresh() }
     func thermalChanged(_ l: ThermalLevel) { flow.thermalChanged(l); refresh() }
-    func reset() { flow.reset(); experimental = nil; refresh() }
+    func reset() { flow.reset(); experimental = nil; showOutbox = false; refresh() }
 
     func continueFromQuality() {
         flow.continueFromQuality()
@@ -90,12 +115,18 @@ final class FlowCoordinator: ObservableObject {
 
     /// Starts and records the current step. The fake camera completes instantly; the on-device
     /// quality verdict comes from the Task 11 pipeline (accept here when the minimum was met).
-    func startCurrentStep(config: CaptureProtocol = .phaseADefault) {
+    func startCurrentStep() {
         guard let step = flow.currentStep,
-              let cfg = config.steps.first(where: { $0.step == step }) else { return }
+              let cfg = flow.steps.first(where: { $0.step == step }) else { return }
+        syncThermal()
         flow.positioned()
-        refresh()
-        guard case .recording? = flow.machineState else { return }
+        // UI-test hook: simulate thermal pressure once, while recording.
+        if ProcessInfo.processInfo.environment["UITEST_THERMAL_SERIOUS"] == "1", !injectedThermal,
+           case .recording? = flow.machineState {
+            injectedThermal = true
+            flow.thermalChanged(.serious)
+        }
+        refresh()        guard case .recording? = flow.machineState else { return }
         Task {
             let d = await camera.record(step: step, seconds: cfg.targetSeconds)
             guard case .recording? = flow.machineState else { return }  // interrupted meanwhile

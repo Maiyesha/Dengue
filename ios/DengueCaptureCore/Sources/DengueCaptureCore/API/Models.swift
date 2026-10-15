@@ -53,6 +53,12 @@ public struct ConsentStatus: Codable, Equatable {
     /// "DS_REG_001" / "DS_REG_002" or nil.
     public var blockCode: String?
     public var checkedAt: String
+    public init(primaryResearch: Bool, consentVersion: String, currentVersion: String, withdrawn: Bool,
+                captureAllowed: Bool, blockCode: String?, checkedAt: String) {
+        self.primaryResearch = primaryResearch; self.consentVersion = consentVersion
+        self.currentVersion = currentVersion; self.withdrawn = withdrawn
+        self.captureAllowed = captureAllowed; self.blockCode = blockCode; self.checkedAt = checkedAt
+    }
     enum CodingKeys: String, CodingKey {
         case primaryResearch = "primary_research", consentVersion = "consent_version"
         case currentVersion = "current_version", withdrawn

@@ -35,26 +35,110 @@ public enum VitalsSkipReason: CaseIterable, Equatable {
 
 public enum ThermalLevel: Equatable { case nominal, fair, serious, critical }
 
-public struct ReferenceVitalsInput: Equatable {
-    public var hr: Int?
-    public var spo2: Int?
-    public var sbp: Int?
-    public var dbp: Int?
-    public var tempC: Double?
-    public var rr: Int?
-    public var crtS: Double?
+public enum VitalField: CaseIterable, Hashable {
+    case hr, spo2, sbp, dbp, tempC, rr, crtS
 
-    public init(hr: Int? = nil, spo2: Int? = nil, sbp: Int? = nil, dbp: Int? = nil,
-                tempC: Double? = nil, rr: Int? = nil, crtS: Double? = nil) {
-        self.hr = hr; self.spo2 = spo2; self.sbp = sbp; self.dbp = dbp
-        self.tempC = tempC; self.rr = rr; self.crtS = crtS
+    /// Spec 6.5 plausibility ranges. Values outside are flagged and need confirmation.
+    public var range: ClosedRange<Double> {
+        switch self {
+        case .hr: return 30...220
+        case .spo2: return 50...100
+        case .sbp: return 40...250
+        case .dbp: return 20...150
+        case .tempC: return 32...42
+        case .rr: return 4...60
+        case .crtS: return 0...10
+        }
     }
 
-    public var isEmpty: Bool {
-        hr == nil && spo2 == nil && sbp == nil && dbp == nil && tempC == nil && rr == nil && crtS == nil
+    public var label: String {
+        switch self {
+        case .hr: return NurseCopy.labelHeartRate
+        case .spo2: return NurseCopy.labelSpO2
+        case .sbp: return NurseCopy.labelSystolic
+        case .dbp: return NurseCopy.labelDiastolic
+        case .tempC: return NurseCopy.labelTemperature
+        case .rr: return NurseCopy.labelRespRate
+        case .crtS: return NurseCopy.labelCapRefill
+        }
     }
 }
 
+public enum VitalSourceDevice: String, CaseIterable, Equatable {
+    case bedsideMonitor = "bedside_monitor"
+    case pulseOximeter = "pulse_oximeter"
+    case thermometer
+    case manualSphygmomanometer = "manual_sphygmomanometer"
+    case other
+
+    public var text: String {
+        switch self {
+        case .bedsideMonitor: return NurseCopy.sourceBedsideMonitor
+        case .pulseOximeter: return NurseCopy.sourcePulseOximeter
+        case .thermometer: return NurseCopy.sourceThermometer
+        case .manualSphygmomanometer: return NurseCopy.sourceManualSphygmomanometer
+        case .other: return NurseCopy.sourceOther
+        }
+    }
+}
+
+public enum VitalIssue: Equatable {
+    case unparseable      // must be corrected
+    case outOfRange       // may be confirmed, then kept and flagged INVALID
+
+    public var text: String {
+        switch self {
+        case .unparseable: return NurseCopy.vitalUnparseable
+        case .outOfRange: return NurseCopy.vitalOutOfRange
+        }
+    }
+}
+
+public struct VitalEntry: Equatable {
+    public var text: String
+    public var source: VitalSourceDevice
+    /// nil means "now" at submission time.
+    public var measuredAt: Date?
+    /// The nurse confirmed an out-of-range value is what the device showed.
+    public var confirmed: Bool
+
+    public init(text: String, source: VitalSourceDevice = .bedsideMonitor,
+                measuredAt: Date? = nil, confirmed: Bool = false) {
+        self.text = text; self.source = source; self.measuredAt = measuredAt; self.confirmed = confirmed
+    }
+}
+
+public struct VitalRecord: Equatable {
+    public var field: VitalField
+    public var value: Double
+    public var source: VitalSourceDevice
+    public var measuredAt: Date
+    /// Confirmed out-of-range value: kept, flagged INVALID, never dropped.
+    public var isInvalid: Bool
+}
+
+public enum StepStatus: Equatable {
+    case passed, recordAgain, couldNotRecord
+
+    public var text: String {
+        switch self {
+        case .passed: return NurseCopy.stepPassed
+        case .recordAgain: return NurseCopy.stepRecordAgain
+        case .couldNotRecord: return NurseCopy.statusCouldNotRecord
+        }
+    }
+}
+
+public extension CaptureStep {
+    var nurseName: String {
+        switch self {
+        case .neutralFace: return NurseCopy.stepNameFace
+        case .fingertipPPG: return NurseCopy.stepNameFingertip
+        case .ocularCapture: return NurseCopy.stepNameEye
+        case .dorsalTongue: return NurseCopy.stepNameTongue
+        }
+    }
+}
 /// Pure screen-order and gating logic for spec section 6. UI-framework free; the app wraps it in an
 /// ObservableObject. Inputs that are invalid for the current screen are ignored.
 public final class CaptureFlow {
@@ -68,6 +152,13 @@ public final class CaptureFlow {
     public private(set) var vitalsSkipReason: VitalsSkipReason?
     public private(set) var checklist: Set<FlowChecklistItem> = []
     public private(set) var thermalHold = false
+    public private(set) var vitalRecords: [VitalRecord] = []
+    public private(set) var vitalIssues: [VitalField: VitalIssue] = [:]
+    /// One-shot nurse prompt (spec 6.5), e.g. note the monitor HR at 20 s of the face step.
+    public private(set) var pendingPrompt: String?
+    private var monitorPromptFired = false
+    public static let monitorPromptSeconds: Double = 20
+    public static let maxSnapshotFutureSkew: TimeInterval = 300
 
     private var consentMessage: String?
     private var assentGiven = false
@@ -93,6 +184,44 @@ public final class CaptureFlow {
         case .positioning(let s), .recording(let s, _), .reviewingStep(let s, _): return s
         case .completed, .blocked: return nil
         }
+    }
+
+    public var steps: [StepConfig] { captureProtocol.steps }
+
+    /// Spec 8 overall status: good / record step N again / could not record.
+    public var statusMessage: String? {
+        guard let state = machine?.state else { return nil }
+        switch state {
+        case .completed(.accepted): return NurseCopy.statusGood
+        case .completed: return NurseCopy.statusCouldNotRecord
+        case .positioning(let s):
+            guard !stepReasons(s).isEmpty,
+                  let i = captureProtocol.steps.firstIndex(where: { $0.step == s }) else { return nil }
+            return NurseCopy.recordStepAgain(i + 1)
+        default: return nil
+        }
+    }
+
+    /// Reason shown when a step is being repeated (attempt > 1).
+    public var retryInstruction: String? {
+        guard screen == .capture, case .positioning(let s)? = machine?.state else { return nil }
+        return stepReasons(s).first?.nurseInstruction
+    }
+
+    /// A step with reasons that we have moved past (or finished) ended UNABLE_TO_ACQUIRE.
+    public func stepStatus(_ step: CaptureStep) -> StepStatus {
+        guard !stepReasons(step).isEmpty else { return .passed }
+        switch machine?.state {
+        case .positioning(let s)?, .recording(let s, _)?, .reviewingStep(let s, _)?:
+            return s == step ? .recordAgain : .couldNotRecord
+        default: return .couldNotRecord
+        }
+    }
+
+    /// Changes whenever anything a view can show changes (lets the coordinator skip no-op refreshes).
+    public var stateSignature: String {
+        "\(screen)|\(String(describing: machine?.state))|\(thermalHold)|\(checklist.count)|"
+            + "\(vitalIssues.count)|\(pendingPrompt ?? "")|\(consentMessage ?? "")"
     }
 
     public func stepReasons(_ step: CaptureStep) -> [ReasonCode] { machine?.lastReasons[step] ?? [] }
@@ -146,7 +275,8 @@ public final class CaptureFlow {
                 ? NurseCopy.consentRenewal : NurseCopy.consentBlocked
             return
         }
-        if !online && now.timeIntervalSince(snapshotAt) > Self.maxSnapshotAge {
+        if snapshotAt.timeIntervalSince(now) > Self.maxSnapshotFutureSkew
+            || (!online && now.timeIntervalSince(snapshotAt) > Self.maxSnapshotAge) {
             consentMessage = NurseCopy.consentBlocked
             return
         }
@@ -180,13 +310,40 @@ public final class CaptureFlow {
         screen = .referenceVitals
     }
 
-    public func enterVitals(_ v: ReferenceVitalsInput) {
-        guard screen == .referenceVitals, !v.isEmpty else { return }
-        monitorHR = v.hr
+    /// Blank entries are ignored. Unparseable values must be corrected; out-of-range values must be
+    /// confirmed and are then kept, flagged. Nothing is silently dropped.
+    public func submitVitals(_ entries: [VitalField: VitalEntry], now: Date, locale: Locale = .current) {
+        guard screen == .referenceVitals else { return }
+        var issues: [VitalField: VitalIssue] = [:]
+        var records: [VitalRecord] = []
+        for field in VitalField.allCases {
+            guard let e = entries[field],
+                  !e.text.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            guard let v = Self.parse(e.text, locale: locale) else { issues[field] = .unparseable; continue }
+            let inRange = field.range.contains(v)
+            if !inRange && !e.confirmed { issues[field] = .outOfRange; continue }
+            records.append(VitalRecord(field: field, value: v, source: e.source,
+                                       measuredAt: e.measuredAt ?? now, isInvalid: !inRange))
+        }
+        vitalIssues = issues
+        guard issues.isEmpty, !records.isEmpty else { return }
+        vitalRecords = records
+        monitorHR = records.first { $0.field == .hr }.map { Int($0.value.rounded()) }
         vitalsSkipReason = nil
         startCapture()
     }
 
+    /// Locale-aware decimal parsing; digits and one separator only (no hex, nan, exponents).
+    static func parse(_ text: String, locale: Locale) -> Double? {
+        var t = text.trimmingCharacters(in: .whitespaces)
+        let sep = locale.decimalSeparator ?? "."
+        if sep != "." && t.contains(sep) { t = t.replacingOccurrences(of: sep, with: ".") }
+        else if sep == "." && t.contains(",") && !t.contains(".") { t = t.replacingOccurrences(of: ",", with: ".") }
+        guard !t.isEmpty, t.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }),
+              t.filter({ $0 == "." }).count <= 1, t.contains(where: { $0.isNumber }),
+              let v = Double(t), v.isFinite else { return nil }
+        return v
+    }
     public func skipVitals(reason: VitalsSkipReason?) {
         guard screen == .referenceVitals, let reason else { return }
         monitorHR = nil
@@ -237,6 +394,17 @@ public final class CaptureFlow {
         }
     }
 
+    /// Called by the recording timer. Fires the monitor-HR prompt once, 20 s into the face step.
+    public func recordingElapsed(_ seconds: Double) {
+        guard screen == .capture, !monitorPromptFired, vitalsSkipReason == nil,
+              case .recording(.neutralFace, _)? = machine?.state,
+              seconds >= Self.monitorPromptSeconds else { return }
+        monitorPromptFired = true
+        pendingPrompt = NurseCopy.noteMonitorHR
+    }
+
+    public func consumePrompt() { pendingPrompt = nil }
+
     public func continueFromQuality() {
         guard screen == .qualityResult else { return }
         screen = .saved
@@ -246,7 +414,9 @@ public final class CaptureFlow {
     public func reset() {
         screen = .patientSelect
         participantCode = nil; bedLabel = nil; monitorHR = nil; vitalsSkipReason = nil
-        checklist = []; thermalHold = false
+        checklist = []; vitalRecords = []; vitalIssues = [:]
+        pendingPrompt = nil; monitorPromptFired = false
+        // thermalHold is device state, not patient state: deliberately kept.
         consentMessage = nil; assentGiven = false; machine = nil
     }
 

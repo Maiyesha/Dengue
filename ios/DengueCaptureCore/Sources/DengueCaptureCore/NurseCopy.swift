@@ -102,6 +102,19 @@ public enum NurseCopy {
     public static let stepNameEye = "Eye"
     public static let stepNameTongue = "Tongue"
     public static let outboxEmpty = "Nothing waiting to upload"
+    public static let noteMonitorHR = "Note the monitor heart rate now"
+    public static let sourceBedsideMonitor = "Bedside monitor"
+    public static let sourcePulseOximeter = "Pulse oximeter"
+    public static let sourceThermometer = "Thermometer"
+    public static let sourceManualSphygmomanometer = "Manual sphygmomanometer"
+    public static let sourceOther = "Other device"
+    public static let labelSource = "Measured with"
+    public static let labelMeasuredAt = "Time measured"
+    public static let vitalUnparseable = "Value not understood — correct it"
+    public static let vitalOutOfRange = "Value is out of the expected range — confirm or correct"
+    public static let vitalConfirm = "Value is correct"
+    public static let buttonOutbox = "Uploads"
+    public static let buttonOK = "OK"
 
     public static let allCues: [GuidanceCue] = [
         .moveCloser, .moveBack, .centreFace, .tiltPhone, .tooDark, .lightBehind, .holdStill, .ready,
@@ -158,6 +171,9 @@ public enum NurseCopy {
             buttonNextPatient, titleOutbox, labelSkipReason, labelHeartRate, labelSpO2, labelRespRate,
             labelTemperature, labelCapRefill, labelSystolic, labelDiastolic, stepNameFace,
             stepNameFingertip, stepNameEye, stepNameTongue, outboxEmpty,
+            noteMonitorHR, sourceBedsideMonitor, sourcePulseOximeter, sourceThermometer,
+            sourceManualSphygmomanometer, sourceOther, labelSource, labelMeasuredAt, vitalUnparseable,
+            vitalOutOfRange, vitalConfirm, buttonOutbox, buttonOK,
         ]
         var all = constants
         for cue in allCues { all.append(text(for: cue)) }
