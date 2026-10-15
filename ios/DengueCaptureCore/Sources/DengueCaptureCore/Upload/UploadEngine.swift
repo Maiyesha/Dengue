@@ -12,6 +12,10 @@ public enum UploadEngineError: Error, Equatable {
     /// `enqueueSession` needs either a createScan request or a known scan id.
     case noScan
     case unknownSession
+    /// I2: a server-requested repeat is offered only within 2 h of capture.
+    case repeatWindowExpired
+    /// C1: recapture artefacts must carry their KMS-wrapped data key.
+    case kmsKeyMissing
 }
 
 /// Drains the outbox: createScan, clinical data, recapture, and per artefact declare → parts → complete.
@@ -35,6 +39,7 @@ public final class UploadEngine {
     private let uploader: PartUploader
     private let notifier: RepeatNotifier
     private let partSize: Int64
+    private let now: () -> Date
 
     private let stateLock = NSLock()
     private var draining = false
@@ -49,9 +54,10 @@ public final class UploadEngine {
     public var onUserAuthFailure: (() -> Void)?
 
     public init(outbox: Outbox, api: DengueAPI, sessions: UploadSessionStore, keys: KeyStore,
-                uploader: PartUploader, notifier: RepeatNotifier, partSize: Int64 = UploadPart.defaultSize) {
+                uploader: PartUploader, notifier: RepeatNotifier, partSize: Int64 = UploadPart.defaultSize,
+                now: @escaping () -> Date = Date.init) {
         self.outbox = outbox; self.api = api; self.sessions = sessions; self.keys = keys
-        self.uploader = uploader; self.notifier = notifier; self.partSize = partSize
+        self.uploader = uploader; self.notifier = notifier; self.partSize = partSize; self.now = now
     }
 
     // MARK: enqueue
@@ -61,8 +67,9 @@ public final class UploadEngine {
     public func enqueueSession(sessionId: UUID, participantCode: String, createScan: CreateScanRequest?,
                                scanId: UUID?, artefacts: [ArtefactUpload]) throws {
         guard createScan != nil || scanId != nil else { throw UploadEngineError.noScan }
-        let rec = UploadSessionRecord(sessionId: sessionId, maskedCode: NurseCopy.maskedStudyID(participantCode),
+        var rec = UploadSessionRecord(sessionId: sessionId, maskedCode: NurseCopy.maskedStudyID(participantCode),
                                       scanId: scanId, artefacts: artefacts)
+        rec.capturedAt = createScan.flatMap { WireDate.date(from: $0.capturedAt) }
         try withRecords { try sessions.save(rec) }   // saved first: items never reference a missing record
         var dep: UUID?
         if let req = createScan {
@@ -72,8 +79,13 @@ public final class UploadEngine {
     }
 
     /// Enqueues a recapture request and the new attempt's artefacts (which wait for the recapture).
+    /// I2: refused after the 2 h repeat window (`repeatWindowExpired`) and for artefacts without a wrapped key.
     public func enqueueRecapture(sessionId: UUID, steps: [CaptureStepName], reason: String,
                                  artefacts: [ArtefactUpload]) throws {
+        guard let rec = record(sessionId) else { throw UploadEngineError.unknownSession }
+        guard RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()), rec.verdict != .closed,
+              rec.verdict != .quarantined else { throw UploadEngineError.repeatWindowExpired }
+        guard artefacts.allSatisfy({ $0.sealed.wrappedKey != nil }) else { throw UploadEngineError.kmsKeyMissing }
         try update(sessionId) {
             $0.artefacts += artefacts
             if !artefacts.isEmpty {
@@ -116,6 +128,10 @@ public final class UploadEngine {
                                                     maskedCode: NurseCopy.maskedStudyID(participantCode),
                                                     scanId: nil, artefacts: [])
             var changed = existing == nil
+            if r.capturedAt == nil, let c = WireDate.date(from: plan.createScan.capturedAt) {
+                r.capturedAt = c
+                changed = true
+            }
             for a in plan.artefacts where !r.artefacts.contains(where: { $0.sealed.keyId == a.sealed.keyId }) {
                 r.artefacts.append(a)
                 changed = true
@@ -368,15 +384,50 @@ public final class UploadEngine {
         case .needsRepeat:
             if case .needsRepeat(let reasons) = e {
                 let step = (try? artefact(for: item))?.1.step
+                if let step { freezeStep(item.sessionId, step: step, reasons: reasons) }
                 // Non-artefact item (createScan, recapture, clinical data): the server did not name a step.
                 markRepeat(item.sessionId, reasons: reasons, steps: step.map { [$0] } ?? Self.coreSteps)
             }
         case .failed:
             if Self.isArtefactKind(item.kind) { markArtefactsFailed(item) }
+            if item.kind == .createScan {
+                // I3: the server will never take this session (DS_SCAN_001, DS_VALIDATION_*, DS_NOT_FOUND, or a
+                // local defect): close it with a notice and destroy its keys and files.
+                closeSession(item.sessionId, notice: e == .duplicateRecent ? NurseCopy.recentScan : NurseCopy.uploadRejected)
+            }
         case .retryScheduled, .ignoredFrozen:
             break
         }
         return true
+    }
+
+    /// I3: an item-level repeat on one artefact freezes that step's other artefact chains only.
+    private func freezeStep(_ sessionId: UUID, step: CaptureStepName, reasons: [ReasonCode]) {
+        guard let rec = record(sessionId), let items = try? outbox.items(sessionId: sessionId) else { return }
+        let ids = Set(rec.artefacts.filter { $0.step == step }.map { $0.localId })
+        let roots = items.filter { it in
+            guard Self.isArtefactKind(it.kind), it.status != .done,
+                  let p = try? decode(UploadPayload.Artefact.self, it.payload) else { return false }
+            return ids.contains(p.artefactLocalId)
+        }.map { $0.id }
+        try? outbox.markNeedsRepeat(itemIds: Set(roots), reasons: reasons)
+    }
+
+    /// Terminal close (I2/I3): nothing more is sent; every key and sealed file of the session is destroyed.
+    private func closeSession(_ sessionId: UUID, notice: String?) {
+        try? outbox.abandonSession(sessionId, reason: "closed")
+        guard let rec = record(sessionId) else { return }
+        let live = rec.artefacts.filter { $0.status != .abandoned }
+        let ok = rec.localDataDestroyed ? true : destroyLocal(live)
+        try? update(sessionId) {
+            $0.verdict = .closed
+            $0.notice = notice
+            $0.repeatSteps = []
+            $0.localDataDestroyed = ok
+            if ok {
+                for i in $0.artefacts.indices where $0.artefacts[i].status != .verified { $0.artefacts[i].status = .abandoned }
+            }
+        }
     }
 
     private static func isDeviceRoute(_ k: OutboxKind) -> Bool {
@@ -484,6 +535,9 @@ public final class UploadEngine {
     /// - partial, revoked: closed.
     private func applyVerdict(_ sessionId: UUID, _ scan: ScanDetail, allowRepeat: Bool) {
         func close(_ notice: String?) { try? update(sessionId) { $0.verdict = .closed; $0.notice = notice } }
+        var highest: [String: Int] = [:]
+        for s in scan.steps { highest[s.step] = max(highest[s.step] ?? 0, s.attempt) }
+        try? update(sessionId) { $0.serverAttempts = highest }
         switch scan.status {
         case .qualityPending, .capturePending:
             if !allowRepeat { try? update(sessionId) { $0.verdict = .awaitingVerdict } }
@@ -515,6 +569,11 @@ public final class UploadEngine {
 
     /// Records the repeat request and posts the notice once. Text: "A recording for ••123 needs repeating".
     private func markRepeat(_ sessionId: UUID, reasons: [ReasonCode], steps: [CaptureStepName]) {
+        // I2: past the 2 h window a repeat cannot be offered: closed as an acquisition failure, no notice.
+        if let rec = record(sessionId), !RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()) {
+            closeSession(sessionId, notice: NurseCopy.acquisitionFailure)
+            return
+        }
         var notifyText: String?
         try? update(sessionId) {
             if $0.verdict != .needsRepeat {
@@ -526,6 +585,57 @@ public final class UploadEngine {
             $0.notice = nil
         }
         if let t = notifyText { notifier.postRepeatNotice(t) }
+    }
+
+    // MARK: read model (I2)
+
+    /// nil for an unknown session.
+    public func status(_ sessionId: UUID) -> SessionStatus? {
+        record(sessionId).map { status(of: $0) }
+    }
+
+    /// Every session the engine knows, oldest capture first.
+    public func sessionSummaries() -> [SessionSummary] {
+        let t = now()
+        return (withRecords { try? sessions.loadAll() } ?? []).map { r in
+            let st = status(of: r)
+            let pending = st == .queued || st == .uploading
+            return SessionSummary(sessionId: r.sessionId, maskedCode: r.maskedCode, capturedAt: r.capturedAt, status: st,
+                                  unsentTooLong: pending && RetentionPolicy.isUnsentTooLong(capturedAt: r.capturedAt, now: t))
+        }.sorted { ($0.capturedAt ?? .distantPast) < ($1.capturedAt ?? .distantPast) }
+    }
+
+    private func status(of r: UploadSessionRecord) -> SessionStatus {
+        switch r.verdict {
+        case .quarantined: return .closed(notice: NurseCopy.regulatoryHold)
+        case .closed: return .closed(notice: r.notice)
+        case .accepted, .awaitingVerdict: return .sent
+        case .needsRepeat:
+            guard RetentionPolicy.repeatOffered(capturedAt: r.capturedAt, now: now()) else {
+                return .closed(notice: NurseCopy.acquisitionFailure)
+            }
+            return .needsRepeat(steps: r.repeatSteps, reasons: r.repeatReasons)
+        case .uploading:
+            let started = r.scanId != nil || r.artefacts.contains { $0.status != .pending || !$0.uploadedParts.isEmpty }
+            return started ? .uploading : .queued
+        }
+    }
+
+    /// Persists the close of every repeat whose 2 h window has passed (call on foreground / launch).
+    public func expireRepeatWindows() {
+        let t = now()
+        for r in (withRecords { try? sessions.loadAll() } ?? []) where r.verdict == .needsRepeat
+            && !RetentionPolicy.repeatOffered(capturedAt: r.capturedAt, now: t) {
+            closeSession(r.sessionId, notice: NurseCopy.acquisitionFailure)
+        }
+    }
+
+    /// The attempt number a recapture of `step` will have (server attempts + 1); nil once 3 are used.
+    public func recaptureAttempt(sessionId: UUID, step: CaptureStepName) -> Int? {
+        guard let r = record(sessionId) else { return nil }
+        let used = max(r.serverAttempts?[step.rawValue] ?? 0,
+                       r.artefacts.filter { $0.step == step }.map { $0.attempt }.max() ?? 0)
+        return used >= 3 ? nil : used + 1
     }
 
     // MARK: record helpers

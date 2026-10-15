@@ -70,6 +70,10 @@ public struct UploadSessionRecord: Codable, Equatable {
     public var repeatSteps: [CaptureStepName] = []
     /// Nurse-facing copy for a closed session (e.g. `NurseCopy.acquisitionFailure`).
     public var notice: String?
+    /// createScan `captured_at` (drives the 2 h repeat window and the 7-day unsent flag). nil = unknown.
+    public var capturedAt: Date?
+    /// Highest attempt per step the server reported (GET /scans); recapture attempts follow it.
+    public var serverAttempts: [String: Int]?
 
     public init(sessionId: UUID, maskedCode: String, scanId: UUID?, artefacts: [ArtefactUpload]) {
         self.sessionId = sessionId; self.maskedCode = maskedCode; self.scanId = scanId; self.artefacts = artefacts

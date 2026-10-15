@@ -23,6 +23,7 @@ final class FakeUploadAPI: DengueAPI {
     /// Scripted complete results in call order (nil = success).
     var completeErrorQueue: [APIError?] = []
     var recaptureErrors: [APIError?] = []
+    var createScanErrors: [APIError?] = []
     var scanResponse: ScanResponse?
     let scanId = UUID()
 
@@ -30,6 +31,7 @@ final class FakeUploadAPI: DengueAPI {
 
     func createScan(_ request: CreateScanRequest, idempotencyKey: String) async throws -> CreateScanResponse {
         log.events.append("createScan")
+        if !createScanErrors.isEmpty, let e = createScanErrors.removeFirst() { throw e }
         let json = #"{"scan":{"id":"\#(scanId.uuidString)","status":"capture_pending","client_session_id":"\#(request.clientSessionId.uuidString)"}}"#
         return try JSONDecoder().decode(CreateScanResponse.self, from: Data(json.utf8))
     }
@@ -150,7 +152,7 @@ final class UploadEngineTests: XCTestCase {
 
     func makeEngine(api: DengueAPI? = nil, partSize: Int64 = 1000) -> UploadEngine {
         UploadEngine(outbox: outbox, api: api ?? self.api, sessions: sessions, keys: keys,
-                     uploader: uploader, notifier: notifier, partSize: partSize)
+                     uploader: uploader, notifier: notifier, partSize: partSize, now: { [clock] in clock!.wallNow })
     }
 
     /// A "sealed" file of `size` random bytes with a real key in the key store.
@@ -168,7 +170,7 @@ final class UploadEngineTests: XCTestCase {
 
     func createScanRequest(_ session: UUID) -> CreateScanRequest {
         CreateScanRequest(
-            clientSessionId: session, patientId: UUID(), capturedAt: "2026-01-01T00:00:00.000Z", offline: true,
+            clientSessionId: session, patientId: UUID(), capturedAt: WireDate.string(from: clock.wallNow), offline: true,
             protocolVersion: "1", captureSteps: [.neutralFace, .fingertipPPG],
             deviceAttempts: [DeviceAttempt(step: .neutralFace, attempt: 1, deviceVerdict: .accept, reasonCodes: [])],
             metadata: ScanMetadata(cameraModel: "iPhone", frameRate: 30, resolution: "1920x1080", exposure: 0.01,

@@ -191,6 +191,8 @@ public struct HeldHandoffSummary: Equatable {
     public var isOpen: Bool
     /// The record exists but cannot be opened; the outbox shows it as unreadable and offers a delete.
     public var isUnreadable: Bool
+    /// nil for an unreadable record.
+    public var capturedAt: Date? = nil
 }
 
 public struct SweepReport: Equatable {
@@ -301,7 +303,7 @@ public final class CaptureHandoffService {
         let loaded = try store.loadEach()
         var out = loaded.records.map {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
-                               isOpen: $0.isOpen, isUnreadable: false)
+                               isOpen: $0.isOpen, isUnreadable: false, capturedAt: $0.capturedAt)
         }
         out += loaded.unreadable.map {
             HeldHandoffSummary(sessionId: $0, maskedCode: "", diagnostic: "HELD_RECORD_UNREADABLE", isOpen: false,
@@ -310,7 +312,7 @@ public final class CaptureHandoffService {
         let known = Set(out.map { $0.sessionId })
         out += memoryHolds.values.filter { !known.contains($0.sessionId) }.map {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
-                               isOpen: false, isUnreadable: false)
+                               isOpen: false, isUnreadable: false, capturedAt: $0.capturedAt)
         }
         return out
     }

@@ -122,6 +122,36 @@ public final class Outbox {
         }
     }
 
+    /// Freezes `itemIds` and every item that transitively depends on them (not finished ones).
+    public func markNeedsRepeat(itemIds: Set<UUID>, reasons: [ReasonCode]) throws {
+        lock.lock(); defer { lock.unlock() }
+        let all = try store.loadAll()
+        var chain = itemIds
+        var changed = true
+        while changed {
+            changed = false
+            for it in all where !chain.contains(it.id) {
+                if let d = it.dependsOn, chain.contains(d) { chain.insert(it.id); changed = true }
+            }
+        }
+        for var it in all where chain.contains(it.id) && it.status != .done && it.status != .quarantined
+            && it.status != .quarantinePending {
+            it.status = .needsRepeat
+            it.reasons = reasons
+            try store.upsert(it)
+        }
+    }
+
+    /// Ends every unfinished item of the session (terminal close: nothing will be sent).
+    public func abandonSession(_ sessionId: UUID, reason: String) throws {
+        try mutateSession(sessionId) {
+            if $0.status != .quarantined && $0.status != .quarantinePending {
+                $0.status = .failed
+                $0.failureReason = $0.failureReason ?? reason
+            }
+        }
+    }
+
     public func quarantine(sessionId: UUID, keys: KeyStore, sealedPaths: [SealedArtefact]) throws {
         lock.lock(); defer { lock.unlock() }
         var firstError: Error?
@@ -149,7 +179,8 @@ public final class Outbox {
             try markRetry(id)
             return .retryScheduled
         case .needsRepeat(let reasons):
-            try markNeedsRepeat(sessionId: it.sessionId, reasons: reasons)
+            // I3: only this item's chain (it and what depends on it) is frozen; other steps keep uploading.
+            try markNeedsRepeat(itemIds: [id], reasons: reasons)
             return .needsRepeat
         case .stopAndQuarantine(let code):
             try mutateSession(it.sessionId) {

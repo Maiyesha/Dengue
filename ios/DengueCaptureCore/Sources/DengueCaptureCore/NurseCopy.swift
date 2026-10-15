@@ -67,6 +67,16 @@ public enum NurseCopy {
     public static let repeatNoticeLead = "Recording for study ID"
     public static let repeatNoticeTail = "needs repeating"
     public static let repeatNotificationLead = "A recording for"
+    /// I3: a session the server refused permanently (validation / unknown patient); its data was removed.
+    public static let uploadRejected = "This recording could not be sent and has been removed from the phone."
+    /// I3 / spec 12: not fully sent 7 days after capture.
+    public static let unsentWarning = "Not sent for 7 days. Connect the phone to the ward network or tell the study coordinator."
+    // I2: per-session upload status (Saved / Uploads screens)
+    public static let statusQueued = "Waiting to send"
+    public static let statusUploading = "Sending"
+    public static let statusSent = "Sent"
+    public static let statusClosed = "Finished"
+    public static let buttonRecordAgain = "Record again"
 
     // Reference / experimental display
     public static let monitorPrefix = "Monitor pulse"
@@ -181,6 +191,7 @@ public enum NurseCopy {
             statusGood, recordAgainLead, recordAgainTail, statusCouldNotRecord, stepPassed, stepRecordAgain,
             cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
             recentScan, repeatNoticeLead, repeatNoticeTail, repeatNotificationLead,
+            uploadRejected, unsentWarning, statusQueued, statusUploading, statusSent, statusClosed, buttonRecordAgain,
             monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,
             skipMonitorUnavailable, skipPatientNotOnMonitor, labelStudyID, labelBed, buttonLookUp,
             buttonContinue, buttonAgree, buttonDecline, buttonStart, buttonPause, buttonSkip, buttonDone,
