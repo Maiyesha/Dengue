@@ -1,15 +1,16 @@
 import Foundation
 
-/// A finished (or in-progress) capture session not yet owned by the upload engine.
+/// A finished (or in-progress) capture session that is not yet fully queued with the upload engine.
 ///
-/// Persisted ENCRYPTED by `FileHeldHandoffStore` (sealed with its own artefact key); it references the session's
-/// sealed artefacts (already encrypted) rather than containing them. Holds only the MASKED participant code.
+/// Persisted ENCRYPTED by `FileHeldHandoffStore` (sealed with its own artefact key). It references the session's
+/// sealed artefacts (already encrypted) rather than containing them, and holds only the MASKED participant code.
 public struct PendingHandoff: Codable, Equatable {
     public enum Stage: String, Codable, Equatable {
-        /// createScan + artefacts (+ clinical data) still to enqueue.
+        /// The engine has no session record yet: this hand-off owns the sealed artefacts.
         case session
-        /// The engine owns the session; only the clinical data is still to enqueue.
-        case clinicalDataOnly
+        /// The engine has the session record and owns the artefacts; `ensureSessionItems` still has to complete
+        /// the outbox items. A discard removes only this record, never the artefacts.
+        case engineOwned
     }
 
     public var sessionId: UUID
@@ -27,7 +28,7 @@ public struct PendingHandoff: Codable, Equatable {
     /// True while the capture session is still running in this process (checkpoint); never retried while open.
     public var isOpen: Bool
     public var stage: Stage
-    /// Built once (stable observation ids) before the session is enqueued.
+    /// Built once (stable observation ids) and persisted before the session is enqueued.
     public var clinicalData: ClinicalDataRequest?
     /// PHI-free reason the hand-off is held (`CaptureHandoffError.diagnostic`).
     public var diagnostic: String?
@@ -45,10 +46,30 @@ public struct PendingHandoff: Codable, Equatable {
 
 public enum HeldHandoffStoreError: Error, Equatable { case unreadable }
 
-/// One sealed file per held hand-off (`<session>.<n>.held`) plus a plaintext index file (`<session>.ref`) that
+/// Result of loading every held record one at a time.
+public struct HeldLoadResult: Equatable {
+    public var records: [PendingHandoff]
+    /// Records whose sealed file could not be opened or decoded (e.g. key unavailable, corruption).
+    public var unreadable: [UUID]
+    public init(records: [PendingHandoff], unreadable: [UUID]) { self.records = records; self.unreadable = unreadable }
+}
+
+public protocol HeldHandoffStoring: AnyObject {
+    func save(_ p: PendingHandoff) throws
+    /// Throws `HeldHandoffStoreError.unreadable` for a record that exists but cannot be opened.
+    func load(_ id: UUID) throws -> PendingHandoff?
+    /// Never fails because of one bad record; throws only if the store directory itself cannot be listed.
+    func loadEach() throws -> HeldLoadResult
+    /// Removes the record (its own key and sealed file), readable or not.
+    func remove(_ id: UUID) throws
+    /// The sealed record files themselves (their keys must survive the sweep).
+    func recordRefs() throws -> [SealedArtefact]
+}
+
+/// One sealed file per held hand-off (`<session>.<uuid>.held`) plus a plaintext index file (`<session>.ref`) that
 /// holds only the sealed file's reference (key id, path, hashes): no PHI on disk in the clear.
 /// The app puts the directory in Class C storage, excluded from backup.
-public final class FileHeldHandoffStore {
+public final class FileHeldHandoffStore: HeldHandoffStoring {
     private let directory: URL
     private let keys: KeyStore
     private let sealer: ArtefactSealer
@@ -85,7 +106,13 @@ public final class FileHeldHandoffStore {
 
     public func load(_ id: UUID) throws -> PendingHandoff? {
         lock.lock(); defer { lock.unlock() }
-        guard let r = try ref(id) else { return nil }
+        let r: SealedArtefact
+        do {
+            guard let found = try ref(id) else { return nil }
+            r = found
+        } catch {
+            throw HeldHandoffStoreError.unreadable
+        }
         let tmp = directory.appendingPathComponent("\(id.uuidString.lowercased()).open.tmp")
         defer { try? FileManager.default.removeItem(at: tmp) }
         do {
@@ -96,22 +123,31 @@ public final class FileHeldHandoffStore {
         }
     }
 
-    /// Throws if any record cannot be read (callers must then not delete anything it might reference).
-    public func loadAll() throws -> [PendingHandoff] {
+    public func loadEach() throws -> HeldLoadResult {
         lock.lock(); defer { lock.unlock() }
-        return try sessionIds().compactMap { try load($0) }
+        var result = HeldLoadResult(records: [], unreadable: [])
+        for id in try sessionIds() {
+            do {
+                if let p = try load(id) { result.records.append(p) }
+            } catch {
+                result.unreadable.append(id)
+            }
+        }
+        return result
     }
+
+    /// Readable records only (see `loadEach` for the unreadable ones).
+    public func loadAll() throws -> [PendingHandoff] { try loadEach().records }
 
     public func remove(_ id: UUID) throws {
         lock.lock(); defer { lock.unlock() }
-        if let r = try ref(id) { destroy(r) }
+        if let r = try? ref(id) { destroy(r) }
         try? FileManager.default.removeItem(at: refURL(id))
     }
 
-    /// The sealed record files themselves (their keys must survive the sweep).
     public func recordRefs() throws -> [SealedArtefact] {
         lock.lock(); defer { lock.unlock() }
-        return try sessionIds().compactMap { try ref($0) }
+        return try sessionIds().compactMap { try? ref($0) }
     }
 
     private func sessionIds() throws -> [UUID] {
@@ -134,10 +170,12 @@ public final class FileHeldHandoffStore {
 }
 
 public enum HandoffOutcome: Equatable {
-    /// The upload engine owns the session now.
+    /// The upload engine has the session and every outbox item.
     case enqueued
     /// Persisted encrypted; retried on launch / foreground / config change.
     case held(CaptureHandoffError)
+    /// Could not be persisted: kept in memory (referenced by the sweep) and retried; the caller should surface it.
+    case holdFailed(CaptureHandoffError)
 }
 
 /// The only reasons a held hand-off may be shredded.
@@ -147,32 +185,43 @@ public enum DiscardReason: String, Equatable {
 
 public struct HeldHandoffSummary: Equatable {
     public var sessionId: UUID
+    /// Empty for an unreadable record.
     public var maskedCode: String
     public var diagnostic: String?
     public var isOpen: Bool
+    /// The record exists but cannot be opened; the outbox shows it as unreadable and offers a delete.
+    public var isUnreadable: Bool
 }
 
 public struct SweepReport: Equatable {
     public var deletedPlaintext = 0
     public var deletedSealed = 0
     public var destroyedKeys = 0
-    /// True when ownership could not be established (no engine, unreadable records): nothing sealed was touched.
+    /// Held records that could not be opened during this sweep.
+    public var unreadableRecords = 0
+    /// True when ownership could not be established (no engine, unreadable session records, or an unreadable
+    /// held record whose artefact references are unknown): nothing sealed was touched.
     public var sealedSweepSkipped = false
 }
 
 /// Hand-off from a finished capture to the upload engine, with the held fallback, the explicit discard and the
 /// relaunch sweep. Rules (T13 rulings):
-/// - Recoverable failures (no engine, unknown patient, metadata incomplete, outbox write error) HOLD the session;
-///   nothing is ever auto-shredded. Shredding happens only via `discard(sessionId:reason:)`.
-/// - Once `enqueueSession` succeeds the engine owns the artefacts: they are never destroyed here afterwards.
-///   A later clinical-data enqueue failure holds only that remaining item.
+/// - Recoverable failures HOLD the session; nothing is auto-shredded. Shredding happens only via `discard`.
+/// - A hold that cannot be persisted is kept in memory, reported as `.holdFailed` and retried.
+/// - Whenever the engine has a session record, `UploadEngine.ensureSessionItems` completes the outbox items
+///   idempotently (also after a crash inside `enqueueSession`).
+/// - Sessions being submitted, and in-memory holds, count as referenced in the sweep.
 public final class CaptureHandoffService {
-    private let store: FileHeldHandoffStore
+    private let store: HeldHandoffStoring
     private let keys: KeyStore
     private let handoff: CaptureHandoff
     private let lock = NSRecursiveLock()
+    /// Holds whose save failed; retried by `retryHeld`.
+    private var memoryHolds: [UUID: PendingHandoff] = [:]
+    /// Sessions inside `process` right now.
+    private var inProgress: [UUID: PendingHandoff] = [:]
 
-    public init(store: FileHeldHandoffStore, keys: KeyStore, handoff: CaptureHandoff = CaptureHandoff()) {
+    public init(store: HeldHandoffStoring, keys: KeyStore, handoff: CaptureHandoff = CaptureHandoff()) {
         self.store = store; self.keys = keys; self.handoff = handoff
     }
 
@@ -189,15 +238,19 @@ public final class CaptureHandoffService {
         lock.lock(); defer { lock.unlock() }
         var q = p
         q.isOpen = false
-        return process(q, engine: engine)
+        return process(q, original: nil, engine: engine)
     }
 
-    /// Retries every closed held hand-off.
+    /// Retries every closed, readable held hand-off and every in-memory hold.
     public func retryHeld(engine: UploadEngine?) -> [UUID: HandoffOutcome] {
         lock.lock(); defer { lock.unlock() }
         var out: [UUID: HandoffOutcome] = [:]
-        for p in (try? store.loadAll()) ?? [] where !p.isOpen {
-            out[p.sessionId] = process(p, engine: engine)
+        let loaded = (try? store.loadEach()) ?? HeldLoadResult(records: [], unreadable: [])
+        for p in loaded.records where !p.isOpen {
+            out[p.sessionId] = process(p, original: p, engine: engine)
+        }
+        for (id, p) in memoryHolds where out[id] == nil {
+            out[id] = process(p, original: nil, engine: engine)
         }
         return out
     }
@@ -205,83 +258,113 @@ public final class CaptureHandoffService {
     /// At launch: sessions left open by a previous process are over; they become retryable (uploaded as captured).
     public func closeOpen() throws {
         lock.lock(); defer { lock.unlock() }
-        for var p in try store.loadAll() where p.isOpen {
+        for var p in try store.loadEach().records where p.isOpen {
             p.isOpen = false
             try store.save(p)
         }
     }
 
-    /// Explicit nurse discard, consent stop (DS_REG_*) or quarantine: crypto-shreds the held session.
+    /// Explicit nurse discard, consent stop (DS_REG_*) or quarantine. Shreds the session's artefacts unless the
+    /// engine already owns them (then only this record goes). An unreadable record is removed; its artefacts, now
+    /// unreferenced, are reclaimed by the next sweep.
     public func discard(sessionId: UUID, reason: DiscardReason) throws {
         lock.lock(); defer { lock.unlock() }
-        guard let p = try store.load(sessionId) else { return }
-        for a in p.artefacts { destroy(a.sealed) }
+        if let p = memoryHolds.removeValue(forKey: sessionId), p.stage == .session {
+            for a in p.artefacts { destroy(a.sealed) }
+        }
+        if let p = try? store.load(sessionId), p.stage == .session {
+            for a in p.artefacts { destroy(a.sealed) }
+        }
         try store.remove(sessionId)
     }
 
     public func heldSummaries() throws -> [HeldHandoffSummary] {
         lock.lock(); defer { lock.unlock() }
-        return try store.loadAll().map {
+        let loaded = try store.loadEach()
+        var out = loaded.records.map {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
-                               isOpen: $0.isOpen)
+                               isOpen: $0.isOpen, isUnreadable: false)
         }
+        out += loaded.unreadable.map {
+            HeldHandoffSummary(sessionId: $0, maskedCode: "", diagnostic: "HELD_RECORD_UNREADABLE", isOpen: false,
+                               isUnreadable: true)
+        }
+        let known = Set(out.map { $0.sessionId })
+        out += memoryHolds.values.filter { !known.contains($0.sessionId) }.map {
+            HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
+                               isOpen: false, isUnreadable: false)
+        }
+        return out
     }
 
     // MARK: processing
 
-    private func process(_ input: PendingHandoff, engine: UploadEngine?) -> HandoffOutcome {
+    private func process(_ input: PendingHandoff, original: PendingHandoff?, engine: UploadEngine?) -> HandoffOutcome {
         var p = input
-        guard let engine else { return hold(p, .uploadNotConfigured) }
-        guard let patientId = p.patientId else { return hold(p, .patientUnknown) }
+        inProgress[p.sessionId] = p
+        defer { inProgress[input.sessionId] = nil }
+        guard let engine else { return hold(p, .uploadNotConfigured, original) }
+        guard let patientId = p.patientId else { return hold(p, .patientUnknown, original) }
 
-        if p.stage == .session {
-            if engine.record(p.sessionId) == nil {
-                let plan: CaptureSessionPlan
-                do {
-                    guard let meta = p.metadata else {
-                        throw CaptureHandoffError.metadataIncomplete(["distance_cm", "angle_deg", "lighting_lux"])
-                    }
-                    plan = try handoff.makeSessionPlan(
-                        sessionId: p.sessionId, patientId: patientId, capturedAt: p.capturedAt, offline: p.offline,
-                        protocolVersion: p.protocolVersion, metadata: try CaptureHandoff.scanMetadata(from: meta),
-                        attempts: p.attempts, vitals: p.vitals, artefacts: p.artefacts)
-                } catch let e as CaptureHandoffError {
-                    return hold(p, e)
-                } catch {
-                    return hold(p, .enqueueFailed(error))
-                }
-                if p.clinicalData == nil { p.clinicalData = plan.clinicalData }
-                // Persist the stable clinical-data ids before the engine takes the session.
-                do { try store.save(p) } catch { return .held(.enqueueFailed(error)) }
-                do {
-                    try engine.enqueueSession(sessionId: p.sessionId, participantCode: p.maskedCode,
-                                              createScan: plan.createScan, scanId: nil, artefacts: plan.artefacts)
-                } catch {
-                    // A record means the engine registered the session: it owns the artefacts now.
-                    if engine.record(p.sessionId) == nil { return hold(p, .enqueueFailed(error)) }
-                }
-                for s in plan.discarded { destroy(s) }   // non-accepted attempts: never uploaded, owned by nobody
+        var plan: CaptureSessionPlan
+        do {
+            guard let meta = p.metadata else {
+                throw CaptureHandoffError.metadataIncomplete(["distance_cm", "angle_deg", "lighting_lux"])
             }
-            p.stage = .clinicalDataOnly
-            p.artefacts = []
+            plan = try handoff.makeSessionPlan(
+                sessionId: p.sessionId, patientId: patientId, capturedAt: p.capturedAt, offline: p.offline,
+                protocolVersion: p.protocolVersion, metadata: try CaptureHandoff.scanMetadata(from: meta),
+                attempts: p.attempts, vitals: p.vitals, artefacts: p.artefacts)
+        } catch let e as CaptureHandoffError {
+            return hold(p, e, original)
+        } catch {
+            return hold(p, .enqueueFailed(error), original)
         }
+        if p.clinicalData == nil { p.clinicalData = plan.clinicalData }
+        plan.clinicalData = p.clinicalData
+        inProgress[p.sessionId] = p
 
-        if let cd = p.clinicalData {
+        if engine.record(p.sessionId) == nil {
+            // Persist the stable clinical-data ids before the engine takes the session (skip if unchanged).
+            if p != original {
+                do { try store.save(p) } catch { return hold(p, .enqueueFailed(error), original) }
+            }
             do {
-                try engine.enqueueClinicalData(sessionId: p.sessionId, patientId: patientId, request: cd)
+                try engine.enqueueSession(sessionId: p.sessionId, participantCode: p.maskedCode,
+                                          createScan: plan.createScan, scanId: nil, artefacts: plan.artefacts)
             } catch {
-                return hold(p, .enqueueFailed(error))
+                if engine.record(p.sessionId) == nil { return hold(p, .enqueueFailed(error), original) }
+                // The record was saved before the throw: ensureSessionItems below completes the items.
             }
         }
-        try? store.remove(p.sessionId)   // the record only: the artefacts belong to the engine
+        p.stage = .engineOwned
+        do {
+            try engine.ensureSessionItems(plan, participantCode: p.maskedCode)
+        } catch {
+            return hold(p, .enqueueFailed(error), original)
+        }
+        for s in plan.discarded { destroy(s) }   // non-accepted attempts: never uploaded, owned by nobody
+        memoryHolds[p.sessionId] = nil
+        try? store.remove(p.sessionId)           // the record only: the artefacts belong to the engine
         return .enqueued
     }
 
-    private func hold(_ p: PendingHandoff, _ e: CaptureHandoffError) -> HandoffOutcome {
+    /// Persists the hold unless it is identical to what is already stored (no re-seal on every retry).
+    private func hold(_ p: PendingHandoff, _ e: CaptureHandoffError, _ original: PendingHandoff?) -> HandoffOutcome {
         var q = p
         q.diagnostic = e.diagnostic
-        try? store.save(q)   // on failure the previous record (if any) and every sealed file stay on disk
-        return .held(e)
+        if let original, original == q {
+            memoryHolds[q.sessionId] = nil
+            return .held(e)
+        }
+        do {
+            try store.save(q)
+            memoryHolds[q.sessionId] = nil
+            return .held(e)
+        } catch {
+            memoryHolds[q.sessionId] = q
+            return .holdFailed(e)
+        }
     }
 
     private func destroy(_ s: SealedArtefact) {
@@ -293,9 +376,11 @@ public final class CaptureHandoffService {
 
     /// Launch only (before any capture starts):
     /// 1. deletes every plaintext file in `captureDirectory`;
-    /// 2. deletes sealed files in `sealedDirectory` referenced neither by the engine nor by a held hand-off;
-    /// 3. destroys artefact keys (UUID-shaped ids only) referenced by neither, nor by a held record itself.
-    /// Steps 2-3 are skipped entirely when ownership cannot be established (no engine, unreadable records).
+    /// 2. deletes sealed files in `sealedDirectory` referenced by none of: the engine, a held hand-off, an
+    ///    in-memory hold, a session being submitted;
+    /// 3. destroys artefact keys (UUID-shaped ids only) referenced by none of those, nor by a held record itself.
+    /// Steps 2-3 are skipped when ownership cannot be established: no engine, unreadable engine records, or an
+    /// unreadable held record (its references are unknown; e.g. Keychain not yet available after a reboot).
     public func sweep(captureDirectory: URL, sealedDirectory: URL, engine: UploadEngine?) -> SweepReport {
         lock.lock(); defer { lock.unlock() }
         let fm = FileManager.default
@@ -305,12 +390,17 @@ public final class CaptureHandoffService {
                 report.deletedPlaintext += 1
             }
         }
-        guard let engine, let owned = engine.referencedArtefacts(),
-              let held = try? store.loadAll(), let records = try? store.recordRefs() else {
+        let loaded = try? store.loadEach()
+        report.unreadableRecords = loaded?.unreadable.count ?? 0
+        guard let engine, let owned = engine.referencedArtefacts(), let loaded, loaded.unreadable.isEmpty,
+              let records = try? store.recordRefs() else {
             report.sealedSweepSkipped = true
             return report
         }
-        let referenced = owned + held.flatMap { $0.artefacts.map { $0.sealed } }
+        let referenced = owned
+            + loaded.records.flatMap { $0.artefacts.map { $0.sealed } }
+            + memoryHolds.values.flatMap { $0.artefacts.map { $0.sealed } }
+            + inProgress.values.flatMap { $0.artefacts.map { $0.sealed } }
         let names = Set(referenced.map { $0.path.lastPathComponent })
         for name in (try? fm.contentsOfDirectory(atPath: sealedDirectory.path)) ?? [] where !names.contains(name) {
             if (try? fm.removeItem(at: sealedDirectory.appendingPathComponent(name))) != nil {

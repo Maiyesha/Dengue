@@ -101,6 +101,57 @@ public final class UploadEngine {
         }
     }
 
+    /// Idempotent repair for a capture hand-off (T13 ruling): makes sure the session record exists and holds every
+    /// plan artefact, then enqueues whichever createScan / declare / upload / complete / clinical-data items are
+    /// missing. Safe after a crash or throw at any point inside `enqueueSession`, and safe to call repeatedly.
+    ///
+    /// Item identity is deterministic: one createScan and one clinicalData item per session; an artefact is
+    /// identified by its sealed key id (the record's local id is reused, so a re-built plan with fresh local ids
+    /// never duplicates), and its chain items by kind + artefact local id. A missing chain item is linked to the
+    /// existing predecessor.
+    public func ensureSessionItems(_ plan: CaptureSessionPlan, participantCode: String) throws {
+        let rec: UploadSessionRecord = try withRecords {
+            let existing = try sessions.load(plan.sessionId)
+            var r = existing ?? UploadSessionRecord(sessionId: plan.sessionId,
+                                                    maskedCode: NurseCopy.maskedStudyID(participantCode),
+                                                    scanId: nil, artefacts: [])
+            var changed = existing == nil
+            for a in plan.artefacts where !r.artefacts.contains(where: { $0.sealed.keyId == a.sealed.keyId }) {
+                r.artefacts.append(a)
+                changed = true
+            }
+            if changed { try sessions.save(r) }
+            return r
+        }
+        let items = try outbox.items(sessionId: plan.sessionId)
+        var createId = items.first { $0.kind == .createScan }?.id
+        if createId == nil, rec.scanId == nil {
+            createId = try outbox.enqueue(.createScan, sessionId: plan.sessionId,
+                                          payload: JSONEncoder().encode(plan.createScan)).id
+        }
+        let decoder = JSONDecoder()
+        func localId(_ i: OutboxItem) -> UUID? {
+            guard i.kind == .declareArtefact || i.kind == .uploadArtefact || i.kind == .completeArtefact else { return nil }
+            return (try? decoder.decode(UploadPayload.Artefact.self, from: i.payload))?.artefactLocalId
+        }
+        for a in rec.artefacts where a.status != .verified && a.status != .abandoned {
+            let mine = items.filter { localId($0) == a.localId }
+            let payload = try JSONEncoder().encode(UploadPayload.Artefact(artefactLocalId: a.localId))
+            var previous = createId
+            for kind in [OutboxKind.declareArtefact, .uploadArtefact, .completeArtefact] {
+                if let found = mine.first(where: { $0.kind == kind }) {
+                    previous = found.id
+                } else {
+                    previous = try outbox.enqueue(kind, sessionId: plan.sessionId, payload: payload,
+                                                  dependsOn: previous).id
+                }
+            }
+        }
+        if let cd = plan.clinicalData, !items.contains(where: { $0.kind == .clinicalData }) {
+            try enqueueClinicalData(sessionId: plan.sessionId, patientId: plan.patientId, request: cd)
+        }
+    }
+
     public func record(_ sessionId: UUID) -> UploadSessionRecord? {
         withRecords { try? sessions.load(sessionId) }
     }

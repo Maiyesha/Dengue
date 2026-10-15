@@ -23,6 +23,8 @@ public enum SessionOutcome: Equatable {
 
 public enum BlockReason: Equatable {
     case lowStorage, lowBattery, consentInvalid, cameraPermissionDenied
+    /// No depth-capable TrueDepth front camera format (spec section 17): blocked before capture.
+    case unsupportedDevice
 }
 
 public enum SessionState: Equatable {
@@ -39,15 +41,19 @@ public struct Preflight: Equatable {
 
     public var freeBytes: Int64
     public var batteryLevel: Double
+    /// The front camera offers a depth-capable TrueDepth format (needed for distance_cm).
+    public var supportsDepthCapture: Bool
 
-    public init(freeBytes: Int64, batteryLevel: Double) {
+    public init(freeBytes: Int64, batteryLevel: Double, supportsDepthCapture: Bool = true) {
         self.freeBytes = freeBytes
         self.batteryLevel = batteryLevel
+        self.supportsDepthCapture = supportsDepthCapture
     }
 
     public var blockReason: BlockReason? {
         if freeBytes < Preflight.minimumFreeBytes { return .lowStorage }
         if batteryLevel < Preflight.minimumBattery { return .lowBattery }
+        if !supportsDepthCapture { return .unsupportedDevice }
         return nil
     }
 

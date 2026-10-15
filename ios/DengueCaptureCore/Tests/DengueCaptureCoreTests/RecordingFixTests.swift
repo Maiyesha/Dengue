@@ -293,8 +293,8 @@ final class RecordingFixTests: XCTestCase {
         XCTAssertTrue(a.allSatisfy(alive))   // never destroyed once the engine owns them
         let held = try XCTUnwrap(try FileHeldHandoffStore(directory: dir.appendingPathComponent("held"), keys: keys)
             .loadAll().first)
-        XCTAssertEqual(held.stage, .clinicalDataOnly)
-        XCTAssertEqual(held.artefacts, [])
+        XCTAssertEqual(held.stage, .engineOwned)
+        XCTAssertEqual(held.artefacts, a)   // kept for ensureSessionItems; not shredded by a discard
 
         store.failKinds = []
         XCTAssertEqual(svc.retryHeld(engine: engine), [p.sessionId: .enqueued])

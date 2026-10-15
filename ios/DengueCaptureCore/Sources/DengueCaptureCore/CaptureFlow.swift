@@ -274,6 +274,7 @@ public final class CaptureFlow {
         case .lowBattery: return NurseCopy.lowBattery
         case .consentInvalid: return NurseCopy.consentBlocked
         case .cameraPermissionDenied: return NurseCopy.cameraDenied
+        case .unsupportedDevice: return NurseCopy.cameraNotReady
         }
     }
 
