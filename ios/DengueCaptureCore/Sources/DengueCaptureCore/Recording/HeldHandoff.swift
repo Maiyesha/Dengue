@@ -31,6 +31,9 @@ public struct PendingHandoff: Codable, Equatable {
         /// R-2: nothing left to queue; the record only keeps the session's `interruptedClips` (never uploaded)
         /// until the nurse discards them. Never retried.
         case interruptedOnly
+        /// Round 2 (I4): a server-requested repeat's accepted artefacts, checkpointed when sign-in became required
+        /// (`repeatReason`, `repeatAcceptedSteps`). Routed to `submitRepeat` by `retryHeld`; removed once queued.
+        case repeatPending
     }
 
     public var sessionId: UUID
@@ -54,6 +57,9 @@ public struct PendingHandoff: Codable, Equatable {
     public var diagnostic: String?
     /// R-2: partial recordings stopped by a sign-in requirement (sealed, kept, never uploaded).
     public var interruptedClips: [InterruptedClip] = []
+    /// Round 2 (I4), `.repeatPending` only: the recapture reason and the steps accepted on the device.
+    public var repeatReason: String?
+    public var repeatAcceptedSteps: [CaptureStep]?
 
     public init(sessionId: UUID, patientId: UUID?, maskedCode: String, capturedAt: Date, offline: Bool,
                 protocolVersion: String, attempts: [AttemptRecord], vitals: [VitalRecord],
@@ -83,6 +89,8 @@ public struct PendingHandoff: Codable, Equatable {
         clinicalData = try c.decodeIfPresent(ClinicalDataRequest.self, forKey: .clinicalData)
         diagnostic = try c.decodeIfPresent(String.self, forKey: .diagnostic)
         interruptedClips = try c.decodeIfPresent([InterruptedClip].self, forKey: .interruptedClips) ?? []
+        repeatReason = try c.decodeIfPresent(String.self, forKey: .repeatReason)
+        repeatAcceptedSteps = try c.decodeIfPresent([CaptureStep].self, forKey: .repeatAcceptedSteps)
     }
 
     /// Every sealed artefact this record references (accepted attempts and interrupted clips).
@@ -253,6 +261,9 @@ public struct HeldHandoffSummary: Equatable {
 public enum RepeatHandoffOutcome: Equatable {
     /// `enqueueRecapture` took the accepted artefacts.
     case enqueued
+    /// Round 2 (M2): an unexpected error; nothing destroyed. Kept as a `.repeatPending` record (retried), or, when
+    /// the engine record already references the artefacts, left to the engine.
+    case held
     /// Nothing could be queued (window passed, nothing accepted, no KMS key...): the repeat's artefacts were
     /// destroyed (the session itself is already on the server).
     case notQueued
@@ -319,10 +330,12 @@ public final class CaptureHandoffService {
     /// R-2: keeps an interrupted clip of a session this process does not checkpoint itself (a server-requested
     /// repeat, whose session the engine already owns): merged into the session's held record, or kept in a new
     /// `.interruptedOnly` record.
+    /// Round 2 (M3): with `engine`, an existing record that is obsolete (`isObsolete`) is never revived by a clip:
+    /// it is replaced by a fresh clip-only record (the engine's artefacts are untouched).
     public func keepInterruptedClip(_ clip: InterruptedClip, sessionId: UUID, maskedCode: String,
-                                    capturedAt: Date) throws {
+                                    capturedAt: Date, engine: UploadEngine? = nil) throws {
         lock.lock(); defer { lock.unlock() }
-        if var existing = try store.load(sessionId) {
+        if var existing = try store.load(sessionId), !(engine.map { isObsolete(existing, engine: $0) } ?? false) {
             existing.interruptedClips.append(clip)
             try store.save(existing)
             return
@@ -331,6 +344,22 @@ public final class CaptureHandoffService {
                                offline: false, protocolVersion: "", attempts: [], vitals: [], artefacts: [],
                                metadata: nil, isOpen: false, stage: .interruptedOnly)
         p.interruptedClips = [clip]
+        try store.save(p)
+    }
+
+    /// Round 2 (I4): a repeat flow's accepted artefacts, persisted when sign-in becomes required, so a kill under
+    /// the overlay loses nothing (the sweep keeps them; the next `retryHeld` routes the record to `submitRepeat`).
+    /// Interrupted clips already kept for the session are preserved.
+    public func checkpointRepeat(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
+                                 accepted: [CaptureStep], sealed: [SealedStepArtefact]) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !sealed.isEmpty else { return }
+        var p = PendingHandoff(sessionId: sessionId, patientId: nil, maskedCode: maskedCode, capturedAt: capturedAt,
+                               offline: false, protocolVersion: "", attempts: [], vitals: [], artefacts: sealed,
+                               metadata: nil, isOpen: true, stage: .repeatPending)
+        p.repeatReason = reason
+        p.repeatAcceptedSteps = accepted
+        if let existing = (try? store.load(sessionId)) ?? nil { p.interruptedClips = existing.interruptedClips }
         try store.save(p)
     }
 
@@ -348,8 +377,20 @@ public final class CaptureHandoffService {
         if let engine { removeObsolete(engine: engine) }
         var out: [UUID: HandoffOutcome] = [:]
         let loaded = (try? store.loadEach()) ?? HeldLoadResult(records: [], unreadable: [])
-        for p in loaded.records where !p.isOpen && p.stage != .interruptedOnly {
+        for p in loaded.records where !p.isOpen && p.stage != .interruptedOnly && p.stage != .repeatPending {
             out[p.sessionId] = process(p, original: p, engine: engine)
+        }
+        // Round 2 (I4): repeat-pending records go to submitRepeat (window and KMS rules apply there).
+        if let engine {
+            for p in loaded.records where !p.isOpen && p.stage == .repeatPending {
+                switch submitRepeat(sessionId: p.sessionId, reason: p.repeatReason ?? "nurse_repeat",
+                                    accepted: p.repeatAcceptedSteps ?? [], sealed: p.artefacts, engine: engine,
+                                    maskedCode: p.maskedCode, capturedAt: p.capturedAt) {
+                case .enqueued: out[p.sessionId] = .enqueued
+                case .held: out[p.sessionId] = .held(.enqueueFailed("REPEAT_PENDING"))
+                case .notQueued: break
+                }
+            }
         }
         for (id, p) in memoryHolds where out[id] == nil {
             out[id] = process(p, original: nil, engine: engine)
@@ -381,6 +422,13 @@ public final class CaptureHandoffService {
             || memory?.stage == .engineOwned || stored?.stage == .engineOwned
             || memory?.stage == .interruptedOnly || stored?.stage == .interruptedOnly
         var seen = Set<String>()
+        // Round 2 (I4): a repeat-pending record owns the artefacts the engine has not taken yet.
+        let engineKeys = Set(engine?.record(sessionId)?.artefacts.map { $0.sealed.keyId } ?? [])
+        for p in [memory, stored].compactMap({ $0 }) where p.stage == .repeatPending {
+            for a in p.artefacts where !engineKeys.contains(a.sealed.keyId) && seen.insert(a.sealed.keyId).inserted {
+                destroy(a.sealed)
+            }
+        }
         if !engineOwned {
             for a in (memory?.artefacts ?? []) + (stored?.artefacts ?? []) where seen.insert(a.sealed.keyId).inserted {
                 destroy(a.sealed)
@@ -427,8 +475,14 @@ public final class CaptureHandoffService {
     /// are not server attempts and are destroyed; if nothing can be queued (2 h window passed, nothing accepted,
     /// no KMS key) every artefact of the repeat is destroyed. A repeat never leaves a held hand-off of the original
     /// session: any obsolete record for it (e.g. a checkpoint written by an older version) is removed.
+    ///
+    /// Round 2 (M2): artefacts are destroyed ONLY when the repeat can never be queued: the 2 h window passed
+    /// (`repeatWindowExpired`), no KMS key (`kmsKeyMissing`), nothing accepted, or the server's attempts for the
+    /// steps are used up. Any other error holds them (`.repeatPending` record, retried) and destroys nothing; and
+    /// nothing is ever destroyed once the engine record references the artefacts.
     public func submitRepeat(sessionId: UUID, reason: String, accepted: [CaptureStep], sealed input: [SealedStepArtefact],
-                             engine: UploadEngine) -> RepeatHandoffOutcome {
+                             engine: UploadEngine, maskedCode: String? = nil,
+                             capturedAt: Date? = nil) -> RepeatHandoffOutcome {
         lock.lock(); defer { lock.unlock() }
         var sealed = input
         // C1: wrap data keys sealed before a KMS key was configured (the device key still exists).
@@ -437,26 +491,68 @@ public final class CaptureHandoffService {
                 if let k = try? keys.key(id: sealed[i].sealed.keyId) { sealed[i].sealed.wrappedKey = try? wrapper.wrap(k) }
             }
         }
+        defer { removeObsolete(engine: engine, only: sessionId) }
+        func giveUp() -> RepeatHandoffOutcome {
+            for a in sealed { destroy(a.sealed) }
+            finishRepeatRecord(sessionId)
+            return .notQueued
+        }
+        func hold() -> RepeatHandoffOutcome {
+            let rec = engine.record(sessionId)
+            let owned = Set(rec?.artefacts.map { $0.sealed.keyId } ?? [])
+            if sealed.contains(where: { owned.contains($0.sealed.keyId) }) { return .held }   // the engine has them
+            var p = PendingHandoff(sessionId: sessionId, patientId: nil,
+                                   maskedCode: maskedCode ?? rec?.maskedCode ?? "",
+                                   capturedAt: capturedAt ?? rec?.capturedAt ?? Date(), offline: false,
+                                   protocolVersion: "", attempts: [], vitals: [], artefacts: sealed, metadata: nil,
+                                   isOpen: false, stage: .repeatPending)
+            p.repeatReason = reason
+            p.repeatAcceptedSteps = accepted
+            if let existing = (try? store.load(sessionId)) ?? nil { p.interruptedClips = existing.interruptedClips }
+            if (try? store.save(p)) == nil { memoryHolds[sessionId] = p }
+            return .held
+        }
+        let acceptedArts = sealed.filter { accepted.contains($0.step) }
+        guard !acceptedArts.isEmpty else { return giveUp() }
+        guard engine.record(sessionId) != nil else { return hold() }   // unknown to the engine: keep, retry
         var uploads: [ArtefactUpload] = []
         var steps: [CaptureStepName] = []
-        for a in sealed {
-            guard accepted.contains(a.step), let name = CaptureStepName(rawValue: a.step.rawValue),
+        for a in acceptedArts {
+            guard let name = CaptureStepName(rawValue: a.step.rawValue),
                   let attempt = engine.recaptureAttempt(sessionId: sessionId, step: name) else { continue }
             if !steps.contains(name) { steps.append(name) }
             uploads.append(ArtefactUpload(step: name, attempt: attempt, kind: a.kind, deviceVerdict: .accept,
                                           sealed: a.sealed))
         }
-        let used = Set(uploads.map { $0.sealed.keyId })
-        defer { removeObsolete(engine: engine, only: sessionId) }
+        guard !uploads.isEmpty else { return giveUp() }   // the server's attempts for these steps are used up
         do {
-            guard !uploads.isEmpty else { throw UploadEngineError.noScan }
             try engine.enqueueRecapture(sessionId: sessionId, steps: steps, reason: reason, artefacts: uploads)
+        } catch UploadEngineError.repeatWindowExpired {
+            return giveUp()
+        } catch UploadEngineError.kmsKeyMissing {
+            return giveUp()
         } catch {
-            for a in sealed { destroy(a.sealed) }
-            return .notQueued
+            return hold()
         }
+        let used = Set(uploads.map { $0.sealed.keyId })
         for a in sealed where !used.contains(a.sealed.keyId) { destroy(a.sealed) }
+        finishRepeatRecord(sessionId)
         return .enqueued
+    }
+
+    /// The repeat is settled: its `.repeatPending` record goes (kept as clip-only if it holds interrupted clips).
+    private func finishRepeatRecord(_ sessionId: UUID) {
+        memoryHolds[sessionId] = nil
+        guard let p = (try? store.load(sessionId)) ?? nil, p.stage == .repeatPending else { return }
+        if p.interruptedClips.isEmpty {
+            try? store.remove(sessionId)
+        } else {
+            var q = p
+            q.stage = .interruptedOnly
+            q.artefacts = []
+            q.isOpen = false
+            try? store.save(q)
+        }
     }
 
     /// R-3 startup repair (run by `retryHeld`, so at launch and on foreground): removes held records that are
@@ -498,7 +594,7 @@ public final class CaptureHandoffService {
     // MARK: processing
 
     private func process(_ input: PendingHandoff, original: PendingHandoff?, engine: UploadEngine?) -> HandoffOutcome {
-        var p = input
+        var p = mergingKeptClips(input)
         inProgress[p.sessionId] = p
         defer { inProgress[input.sessionId] = nil }
         if p.attempts.isEmpty, !p.interruptedClips.isEmpty {
@@ -574,6 +670,21 @@ public final class CaptureHandoffService {
         }
         try? store.remove(p.sessionId)           // the record only: the artefacts belong to the engine
         return .enqueued
+    }
+
+    /// Round 2 (I2): interrupted clips merged into the stored record (or an in-memory hold) after this submission
+    /// was built are carried along (union by sealed key id), so a save never overwrites them and the record is
+    /// never removed while it holds clips.
+    private func mergingKeptClips(_ p: PendingHandoff) -> PendingHandoff {
+        var q = p
+        var have = Set(q.interruptedClips.flatMap { $0.artefacts.map { $0.sealed.keyId } })
+        let stored = (try? store.load(p.sessionId)) ?? nil
+        for c in (stored?.interruptedClips ?? []) + (memoryHolds[p.sessionId]?.interruptedClips ?? [])
+            where !c.artefacts.contains(where: { have.contains($0.sealed.keyId) }) {
+            q.interruptedClips.append(c)
+            for a in c.artefacts { have.insert(a.sealed.keyId) }
+        }
+        return q
     }
 
     /// R-2: a record holding only interrupted clips. Kept (persisted, or in memory if that fails), never queued.
