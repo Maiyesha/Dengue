@@ -24,6 +24,8 @@ final class FakeUploadAPI: DengueAPI {
     var completeErrorQueue: [APIError?] = []
     var recaptureErrors: [APIError?] = []
     var createScanErrors: [APIError?] = []
+    /// Idempotency key of every createScan call, in order.
+    var createScanKeys: [String] = []
     var scanResponse: ScanResponse?
     let scanId = UUID()
 
@@ -31,6 +33,7 @@ final class FakeUploadAPI: DengueAPI {
 
     func createScan(_ request: CreateScanRequest, idempotencyKey: String) async throws -> CreateScanResponse {
         log.events.append("createScan")
+        createScanKeys.append(idempotencyKey)
         if !createScanErrors.isEmpty, let e = createScanErrors.removeFirst() { throw e }
         let json = #"{"scan":{"id":"\#(scanId.uuidString)","status":"capture_pending","client_session_id":"\#(request.clientSessionId.uuidString)"}}"#
         return try JSONDecoder().decode(CreateScanResponse.self, from: Data(json.utf8))

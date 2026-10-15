@@ -117,7 +117,8 @@ final class APIClientTests: XCTestCase {
     func testNonJSONErrorBodiesMapByStatus() async {
         await assertError(502, Data("<html>bad gateway</html>".utf8), .retryable)
         await assertError(401, Data("nope".utf8), .unauthorized)
-        await assertError(400, Data("nope".utf8), .invalid(code: ""))
+        // R-1 (deliberate change): a 4xx without a DengueSense envelope is not a server decision.
+        await assertError(400, Data("nope".utf8), .networkRestricted(httpStatus: 400))
     }
 
     func testQG099ParsesRecaptureExhaustedDetail() async {

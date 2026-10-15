@@ -15,6 +15,16 @@ public enum APIError: Error, Equatable {
     case uploadIncomplete
     /// DS_QG_099: max recaptures reached; the server committed (steps marked UNABLE_TO_ACQUIRE). Refetch the scan.
     case recaptureExhausted(unableToAcquire: [String], recaptured: [String], status: String)
+    /// R-1: an HTTP response that is not from the DengueSense API: no parseable error envelope (captive-portal
+    /// login page, WAF/CDN 403, proxy 413, gateway 429, a 2xx HTML page) or a redirect away from the API host.
+    /// Never a server decision about the data: retried with backoff and the same idempotency key.
+    case networkRestricted(httpStatus: Int)
+
+    /// True for `.networkRestricted` (the phone's network needs sign-in or is filtering requests).
+    public var isNetworkRestricted: Bool {
+        if case .networkRestricted = self { return true }
+        return false
+    }
 
     public static func from(code: String, httpStatus: Int, reasonCodes: [ReasonCode] = [],
                              detail: [String: JSONValue]? = nil) -> APIError {

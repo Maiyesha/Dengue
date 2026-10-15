@@ -111,6 +111,18 @@ final class ProductionWiringTests: XCTestCase {
         XCTAssertEqual(r.outcome, .ok)
     }
 
+    /// R-1: behind a captive portal the lookup is treated like being offline (roster snapshot), never "unknown".
+    func testCaptivePortalLookupUsesRosterSnapshot() async {
+        let api = ConsentAPI()
+        let cache = ConsentCache()
+        cache.update(roster(at: now), fetchedAt: now)
+        api.lookupResult = .failure(.networkRestricted(httpStatus: 403))
+        let r = await service(api, cache: cache).resolve(participantCode: "DS-2026-00417")
+        XCTAssertFalse(r.online)
+        XCTAssertEqual(r.patientId, pid)
+        XCTAssertEqual(r.outcome, .ok)
+    }
+
     func testOfflineSnapshotOlderThan24hIsNotUsed() async {
         let api = ConsentAPI()
         let cache = ConsentCache()

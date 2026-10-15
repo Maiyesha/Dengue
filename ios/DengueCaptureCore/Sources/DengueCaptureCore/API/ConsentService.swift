@@ -84,6 +84,8 @@ public final class ConsentService {
             return ConsentResolution(status: s, snapshotAt: now(), online: true, patientId: p.patientId, outcome: .ok)
         } catch APIError.retryable {
             return offline(participantCode)
+        } catch APIError.networkRestricted {
+            return offline(participantCode)   // R-1: captive portal / filtering network: use the roster snapshot
         } catch APIError.unauthorized {
             return blocked(.signInRequired)
         } catch APIError.invalid(code: "DS_NOT_FOUND") {

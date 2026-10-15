@@ -15,6 +15,8 @@ struct OutboxView: View {
     @State private var sessions: [SessionSummary] = []
     @State private var pendingDelete: HeldHandoffSummary?
     @State private var repeatRequest: RepeatRequest?
+    /// R-1: the last upload attempt met a captive portal / filtering network (nothing is deleted).
+    @State private var networkRestricted = false
     private let tick = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -22,6 +24,10 @@ struct OutboxView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(NurseCopy.titleOutbox).font(.title2)
+                    if networkRestricted {
+                        Text(NurseCopy.networkNeedsSignIn).foregroundColor(.orange)
+                            .accessibilityIdentifier("network-needs-sign-in")
+                    }
                     if held.isEmpty && sessions.isEmpty {
                         Text(NurseCopy.outboxEmpty)
                     }
@@ -98,7 +104,11 @@ struct OutboxView: View {
             let engine = UploadCoordinator.shared?.engine
             engine?.expireRepeatWindows()
             let list = engine?.sessionSummaries() ?? []
-            await MainActor.run { sessions = list.reversed() }   // newest first
+            let restricted = engine?.isNetworkRestricted ?? false
+            await MainActor.run {
+                sessions = list.reversed()   // newest first
+                networkRestricted = restricted
+            }
         }
     }
 }

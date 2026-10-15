@@ -52,6 +52,25 @@ public final class UploadEngine {
     /// retry (an offline capture often uploads after the nurse's session expired); the app should prompt
     /// sign-in. Other sessions' device-token uploads continue.
     public var onUserAuthFailure: (() -> Void)?
+    /// R-1: called when `isNetworkRestricted` changes. The app shows `NurseCopy.networkNeedsSignIn`.
+    public var onNetworkRestrictedChange: ((Bool) -> Void)?
+
+    private var networkRestricted = false
+    /// R-1 captive-portal signal: the last API response was not from the DengueSense API (no error envelope, or
+    /// a redirect away from the API host). Never a failure: recordings are kept and retried. Cleared by the next
+    /// successful API call.
+    public var isNetworkRestricted: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return networkRestricted
+    }
+
+    private func setNetworkRestricted(_ value: Bool) {
+        stateLock.lock()
+        let changed = networkRestricted != value
+        networkRestricted = value
+        stateLock.unlock()
+        if changed { onNetworkRestrictedChange?(value) }
+    }
 
     public init(outbox: Outbox, api: DengueAPI, sessions: UploadSessionStore, keys: KeyStore,
                 uploader: PartUploader, notifier: RepeatNotifier, partSize: Int64 = UploadPart.defaultSize,
@@ -221,6 +240,7 @@ public final class UploadEngine {
             do {
                 try await process(item)
                 try outbox.markDone(item.id)
+                setNetworkRestricted(false)
             } catch let e as APIError {
                 if !(await handle(e, item)) { return }
             } catch let f as LocalFailure {
@@ -266,7 +286,7 @@ public final class UploadEngine {
         case .createScan:
             let req = try decode(CreateScanRequest.self, item.payload)
             let resp = try await api.createScan(req, idempotencyKey: key)
-            try update(item.sessionId) { $0.scanId = resp.scan.id }
+            try update(item.sessionId) { $0.scanId = resp.scan.id; $0.diagnostic = nil }
         case .clinicalData:
             let p = try decode(UploadPayload.ClinicalData.self, item.payload)
             _ = try await api.postClinicalData(patientId: p.patientId, request: p.request, idempotencyKey: key)
@@ -359,6 +379,7 @@ public final class UploadEngine {
 
     /// Returns false when draining should stop.
     private func handle(_ e: APIError, _ item: OutboxItem) async -> Bool {
+        if e.isNetworkRestricted { setNetworkRestricted(true) }
         if Self.isDeviceRoute(item.kind), e == .unauthorized || e == .reEnrol {
             // The device token is stale or revoked; failing the upload would strand the data. Keep it.
             _ = try? outbox.apply(.retryable, to: item.id)
@@ -369,6 +390,22 @@ public final class UploadEngine {
             _ = try? outbox.apply(.retryable, to: item.id)
             onUserAuthFailure?()
             return true
+        }
+        if item.kind == .createScan {
+            // R-1: one policy decides whether a createScan failure may touch the session's data.
+            switch CreateScanFailurePolicy.decide(error: e) {
+            case .closeAndDestroy:
+                guard (try? outbox.apply(e, to: item.id)) != nil else { return false }
+                closeRejectedSession(item.sessionId, error: e)
+                return true
+            case .retry:
+                return (try? outbox.apply(.retryable, to: item.id)) != nil
+            case .hold(let diagnostic):
+                try? update(item.sessionId) { $0.diagnostic = diagnostic }
+                return (try? outbox.apply(.retryable, to: item.id)) != nil
+            case .serverDirective:
+                break   // quarantine / repeat: handled below like any other item
+            }
         }
         guard let action = try? outbox.apply(e, to: item.id) else { return false }
         switch action {
@@ -390,11 +427,7 @@ public final class UploadEngine {
             }
         case .failed:
             if Self.isArtefactKind(item.kind) { markArtefactsFailed(item) }
-            if item.kind == .createScan {
-                // I3: the server will never take this session (DS_SCAN_001, DS_VALIDATION_*, DS_NOT_FOUND, or a
-                // local defect): close it with a notice and destroy its keys and files.
-                closeSession(item.sessionId, notice: e == .duplicateRecent ? NurseCopy.recentScan : NurseCopy.uploadRejected)
-            }
+            // createScan never reaches here: its failures are decided by CreateScanFailurePolicy above.
         case .retryScheduled, .ignoredFrozen:
             break
         }
@@ -411,6 +444,18 @@ public final class UploadEngine {
             return ids.contains(p.artefactLocalId)
         }.map { $0.id }
         try? outbox.markNeedsRepeat(itemIds: Set(roots), reasons: reasons)
+    }
+
+    /// R-1 guarded destroy path for a rejected createScan: only DS_SCAN_001, DS_VALIDATION_* and DS_NOT_FOUND may
+    /// close the session and destroy its keys and files. Anything else is a programming error: assert, and keep
+    /// the data (the item is rescheduled).
+    private func closeRejectedSession(_ sessionId: UUID, error: APIError) {
+        guard CreateScanFailurePolicy.permitsDestroy(error),
+              case .closeAndDestroy(let notice) = CreateScanFailurePolicy.decide(error: error) else {
+            assertionFailure("createScan destroy path reached with a non-destroy error: \(error)")
+            return
+        }
+        closeSession(sessionId, notice: notice)
     }
 
     /// Terminal close (I2/I3): nothing more is sent; every key and sealed file of the session is destroyed.

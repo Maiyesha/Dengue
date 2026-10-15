@@ -139,6 +139,8 @@ public enum NurseCopy {
     public static let vitalConfirm = "Value is correct"
     public static let buttonOutbox = "Uploads"
     public static let buttonOK = "OK"
+    /// R-1: captive-portal / filtering network banner (never a failure; nothing is deleted).
+    public static let networkNeedsSignIn = "Network needs sign-in — recordings are kept on the phone"
 
     public static let allCues: [GuidanceCue] = [
         .moveCloser, .moveBack, .centreFace, .tiltPhone, .tooDark, .lightBehind, .holdStill, .ready,
@@ -210,7 +212,7 @@ public enum NurseCopy {
             confirmDeleteRecording,
             noteMonitorHR, sourceBedsideMonitor, sourcePulseOximeter, sourceThermometer,
             sourceManualSphygmomanometer, sourceOther, labelSource, labelMeasuredAt, vitalUnparseable,
-            vitalOutOfRange, vitalConfirm, buttonOutbox, buttonOK,
+            vitalOutOfRange, vitalConfirm, buttonOutbox, buttonOK, networkNeedsSignIn,
         ]
         var all = constants
         for cue in allCues { all.append(text(for: cue)) }

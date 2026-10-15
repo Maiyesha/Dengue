@@ -56,18 +56,45 @@ public final class URLSessionDengueAPI: DengueAPI {
             throw APIError.retryable   // transport failure: safe to retry with the same key
         }
         guard let http = response as? HTTPURLResponse else { throw APIError.retryable }
-        guard (200..<300).contains(http.statusCode) else { throw Self.decodeError(data: data, status: http.statusCode) }
+        if let e = Self.responseError(status: http.statusCode, data: data, finalURL: http.url,
+                                      contentType: http.value(forHTTPHeaderField: "Content-Type"),
+                                      apiHost: baseURL.host) {
+            throw e
+        }
         return data
     }
 
-    /// Envelope code wins; a non-JSON body maps by HTTP status alone.
+    /// Classifies a finished HTTP exchange; nil = a usable API response.
+    /// R-1:
+    /// - redirected away from the API host (captive portal) → `.networkRestricted`, whatever the status;
+    /// - 2xx with a non-JSON body type (e.g. a portal's HTML login page served as 200) → `.networkRestricted`;
+    /// - non-2xx → `decodeError`.
+    static func responseError(status: Int, data: Data, finalURL: URL?, contentType: String?, apiHost: String?) -> APIError? {
+        if let final = finalURL?.host?.lowercased(), let api = apiHost?.lowercased(), final != api {
+            return .networkRestricted(httpStatus: status)
+        }
+        if (200..<300).contains(status) {
+            if !data.isEmpty, let ct = contentType?.lowercased(), !ct.contains("json") {
+                return .networkRestricted(httpStatus: status)
+            }
+            return nil
+        }
+        return decodeError(data: data, status: status)
+    }
+
+    /// The DengueSense error envelope's code wins. A response WITHOUT a parseable envelope did not come from the
+    /// API's error handler (every API error carries one): R-1 maps it to `.networkRestricted` (captive portal,
+    /// WAF/CDN, proxy, gateway rate limit), except a bare 5xx (gateway/server outage: `.retryable`) and a bare 401
+    /// (`.unauthorized`, kept for retry and sign-in). None of these ever lets the client destroy data.
     static func decodeError(data: Data, status: Int) -> APIError {
-        if let env = try? JSONDecoder().decode(ErrorEnvelope.self, from: data) {
+        if let env = try? JSONDecoder().decode(ErrorEnvelope.self, from: data), env.error.code.hasPrefix("DS_") {
             var detail: [String: JSONValue]?
             if case .object(let o)? = env.error.detail { detail = o }
             return APIError.from(code: env.error.code, httpStatus: status, detail: detail)
         }
-        return APIError.from(code: "", httpStatus: status)
+        if (500...599).contains(status) { return .retryable }
+        if status == 401 { return .unauthorized }
+        return .networkRestricted(httpStatus: status)
     }
 
     private func call<T: Decodable>(_ type: T.Type, method: String, path: String, query: [URLQueryItem] = [],

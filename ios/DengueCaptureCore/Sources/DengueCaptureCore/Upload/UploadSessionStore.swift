@@ -74,6 +74,9 @@ public struct UploadSessionRecord: Codable, Equatable {
     public var capturedAt: Date?
     /// Highest attempt per step the server reported (GET /scans); recapture attempts follow it.
     public var serverAttempts: [String: Int]?
+    /// R-1: the last recognised server code that held createScan (data kept, retried). Support diagnostic only;
+    /// never shown to the nurse. Cleared when createScan succeeds.
+    public var diagnostic: String?
 
     public init(sessionId: UUID, maskedCode: String, scanId: UUID?, artefacts: [ArtefactUpload]) {
         self.sessionId = sessionId; self.maskedCode = maskedCode; self.scanId = scanId; self.artefacts = artefacts
