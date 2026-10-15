@@ -16,6 +16,8 @@ public enum CaptureHandoffError: Error, Equatable {
     case noAttempts
     /// createScan metadata fields the contract requires but that were not measured (wire names).
     case metadataIncomplete([String])
+    /// Measured values outside the server's physical sanity ranges (would be a permanent 400); wire names.
+    case metadataOutOfRange([String])
     case patientUnknown
     /// No upload engine (e.g. MDM `api_base_url` not provisioned yet).
     case uploadNotConfigured
@@ -27,6 +29,7 @@ public enum CaptureHandoffError: Error, Equatable {
         switch self {
         case .noAttempts: return "HANDOFF_NO_ATTEMPTS"
         case .metadataIncomplete(let f): return "HANDOFF_METADATA_INCOMPLETE:" + f.joined(separator: ",")
+        case .metadataOutOfRange(let f): return "HANDOFF_METADATA_OUT_OF_RANGE:" + f.joined(separator: ",")
         case .patientUnknown: return "HANDOFF_PATIENT_UNKNOWN"
         case .uploadNotConfigured: return "HANDOFF_UPLOAD_NOT_CONFIGURED"
         case .enqueueFailed(let t): return "HANDOFF_ENQUEUE_FAILED:" + t
@@ -119,6 +122,11 @@ public struct CaptureHandoff {
     /// createScan `metadata` from a recorded attempt's capture metadata. The contract requires the measured
     /// distance, angle and lux; any that were not measured are reported (the hand-off is then held), never
     /// invented. Ambient temperature/humidity are optional (only when entered).
+    /// Mirrors backend/src/routes/scans.ts CaptureMetadata (T13 ruling: physical sanity, not the guidance spec).
+    public static let sanityDistanceCm: ClosedRange<Double> = 5...300
+    public static let sanityAngleDeg: ClosedRange<Double> = -90...90
+    public static let sanityMinLux = 0.0
+
     public static func scanMetadata(from m: CaptureMetadata) throws -> ScanMetadata {
         var missing: [String] = []
         if m.distanceCm == nil { missing.append("distance_cm") }
@@ -127,6 +135,12 @@ public struct CaptureHandoff {
         guard missing.isEmpty, let d = m.distanceCm, let a = m.angleDeg, let l = m.lux else {
             throw CaptureHandoffError.metadataIncomplete(missing)
         }
+        // Server sanity ranges (backend CaptureMetadata): outside them createScan would 400 permanently.
+        var outOfRange: [String] = []
+        if !(d.isFinite && sanityDistanceCm.contains(d)) { outOfRange.append("distance_cm") }
+        if !(a.isFinite && sanityAngleDeg.contains(a)) { outOfRange.append("angle_deg") }
+        if !(l.isFinite && l >= sanityMinLux) { outOfRange.append("lighting_lux") }
+        guard outOfRange.isEmpty else { throw CaptureHandoffError.metadataOutOfRange(outOfRange) }
         return ScanMetadata(cameraModel: m.deviceModel, frameRate: m.fps, resolution: m.resolution,
                             exposure: m.exposureDurationMs / 1000, distanceCm: d, angleDeg: a, lightingLux: l,
                             ambientTempC: m.ambientTempC, ambientHumidityPct: m.ambientHumidityPct, mount: m.mount,

@@ -6,6 +6,8 @@ import Foundation
 final class TestHeldStore: HeldHandoffStoring {
     let inner: FileHeldHandoffStore
     var failSave = false
+    /// Saves after this many succeed fail (nil = off).
+    var failAfter: Int?
     var saves = 0
     var onSave: (() -> Void)?
     struct SaveFailed: Error {}
@@ -16,6 +18,7 @@ final class TestHeldStore: HeldHandoffStoring {
         onSave = nil
         hook?()
         if failSave { throw SaveFailed() }
+        if let n = failAfter, saves > n { throw SaveFailed() }
         try inner.save(p)
     }
     func load(_ id: UUID) throws -> PendingHandoff? { try inner.load(id) }
@@ -182,7 +185,7 @@ final class RecordingFix2Tests: XCTestCase {
         let (e, _) = engine(obStore)
         let svc = CaptureHandoffService(store: try store(), keys: keys)
         XCTAssertEqual(svc.submit(p, engine: e), .held(.enqueueFailed("Injected")))
-        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard)
+        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
         XCTAssertTrue(a.allSatisfy(alive))
     }
 
@@ -247,7 +250,7 @@ final class RecordingFix2Tests: XCTestCase {
         XCTAssertEqual(r1.unreadableRecords, 1)
         XCTAssertTrue(bad.artefacts.allSatisfy(alive))
 
-        try svc.discard(sessionId: bad.sessionId, reason: .nurseDiscard)
+        try svc.discard(sessionId: bad.sessionId, reason: .nurseDiscard, engine: e)
         XCTAssertEqual(try svc.heldSummaries().count, 0)
         let r2 = svc.sweep(captureDirectory: dir.appendingPathComponent("capture"), sealedDirectory: sealedDir, engine: e)
         XCTAssertFalse(r2.sealedSweepSkipped)
@@ -288,5 +291,74 @@ final class RecordingFix2Tests: XCTestCase {
         f.submitVitals([.hr: VitalEntry(text: "88")], now: now)
         XCTAssertEqual(f.screen, .blocked)
         XCTAssertEqual(f.blockingMessage, NurseCopy.cameraNotReady)
+    }
+
+    // MARK: round 3
+
+    func testDiscardTrustsEngineOwnershipOverStoredStage() throws {
+        let a = try sealed(.neutralFace)
+        let p = pending(a)
+        let (e, _) = engine(FlakyOutboxStore())
+        let pl = try plan(for: p)
+        try e.enqueueSession(sessionId: p.sessionId, participantCode: p.maskedCode, createScan: pl.createScan,
+                             scanId: nil, artefacts: pl.artefacts)   // engine owns the session...
+        let st = try store()
+        try st.save(p)                                              // ...but the held record still says .session
+        XCTAssertEqual(try st.load(p.sessionId)?.stage, .session)
+        let svc = CaptureHandoffService(store: st, keys: keys)
+        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
+        XCTAssertTrue(a.allSatisfy(alive))
+        XCTAssertNil(try st.load(p.sessionId))
+    }
+
+    func testMemoryHoldEngineOwnedOverridesStoredSessionStage() throws {
+        let a = try sealed(.neutralFace)
+        let p = pending(a)
+        let obStore = FlakyOutboxStore()
+        obStore.failKinds = [.clinicalData]
+        let (e, _) = engine(obStore)
+        let st = try store()
+        st.failAfter = 1   // pre-enqueue save (.session) succeeds; the .engineOwned hold save fails
+        let svc = CaptureHandoffService(store: st, keys: keys)
+        XCTAssertEqual(svc.submit(p, engine: e), .holdFailed(.enqueueFailed("Injected")))
+        st.failAfter = nil
+        XCTAssertEqual(try st.load(p.sessionId)?.stage, .session)
+        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: nil)   // engine unknown here
+        XCTAssertTrue(a.allSatisfy(alive))
+    }
+
+    func testDiscardWithoutEngineRecordStillShreds() throws {
+        let a = try sealed(.neutralFace)
+        let p = pending(a)
+        let svc = CaptureHandoffService(store: try store(), keys: keys)
+        XCTAssertEqual(svc.submit(p, engine: nil), .held(.uploadNotConfigured))
+        let (e, _) = engine(FlakyOutboxStore())
+        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
+        XCTAssertTrue(a.allSatisfy { !alive($0) })
+    }
+
+    func testMetadataOutsideServerSanityRangesIsHeld() throws {
+        var m = meta()
+        m.distanceCm = 400; m.angleDeg = -95; m.lux = -1
+        XCTAssertThrowsError(try CaptureHandoff.scanMetadata(from: m)) {
+            XCTAssertEqual($0 as? CaptureHandoffError, .metadataOutOfRange(["distance_cm", "angle_deg", "lighting_lux"]))
+        }
+        var edge = meta()
+        edge.distanceCm = 5; edge.angleDeg = 90; edge.lux = 0
+        XCTAssertNoThrow(try CaptureHandoff.scanMetadata(from: edge))   // in sanity range (merely out of spec)
+        var nan = meta()
+        nan.lux = .nan
+        XCTAssertThrowsError(try CaptureHandoff.scanMetadata(from: nan))
+
+        var p = pending(try sealed(.neutralFace))
+        p.metadata = m
+        let (e, ob) = engine(FlakyOutboxStore())
+        let svc = CaptureHandoffService(store: try store(), keys: keys)
+        let outcome = svc.submit(p, engine: e)
+        XCTAssertEqual(outcome, .held(.metadataOutOfRange(["distance_cm", "angle_deg", "lighting_lux"])))
+        XCTAssertNil(e.record(p.sessionId))
+        XCTAssertEqual(try ob.items(sessionId: p.sessionId).count, 0)
+        XCTAssertEqual(CaptureHandoffError.metadataOutOfRange(["distance_cm"]).diagnostic,
+                       "HANDOFF_METADATA_OUT_OF_RANGE:distance_cm")
     }
 }

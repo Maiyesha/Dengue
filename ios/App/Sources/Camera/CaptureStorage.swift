@@ -25,6 +25,8 @@ final class CaptureStorage: @unchecked Sendable {
     let handoffs: CaptureHandoffService
     private let lock = NSLock()
     private var launched = false
+    /// One backoff loop at a time for `.holdFailed` outcomes.
+    private var retryLoopScheduled = false
 
     init() throws {
         let fm = FileManager.default
@@ -72,8 +74,15 @@ final class CaptureStorage: @unchecked Sendable {
 
     /// Foreground, managed-config change, and launch.
     func retryHeld() {
-        let results = handoffs.retryHeld(engine: engine)
-        if results.values.contains(.enqueued) { UploadCoordinator.shared?.drainSoon() }
+        handle(handoffs.retryHeld(engine: engine).values)
+    }
+
+    /// Every retry path (launch, foreground, config change, outbox, submit) ends here: drain on success, and a
+    /// backoff retry loop whenever a hold could not be persisted (`.holdFailed`).
+    private func handle<S: Sequence>(_ outcomes: S) where S.Element == HandoffOutcome {
+        let list = Array(outcomes)
+        if list.contains(.enqueued) { UploadCoordinator.shared?.drainSoon() }
+        if list.contains(where: { if case .holdFailed = $0 { return true }; return false }) { scheduleRetry() }
     }
 
     func checkpoint(_ p: PendingHandoff) { try? handoffs.checkpoint(p) }
@@ -81,23 +90,27 @@ final class CaptureStorage: @unchecked Sendable {
     @discardableResult
     func submit(_ p: PendingHandoff) -> HandoffOutcome {
         let outcome = handoffs.submit(p, engine: engine)
-        switch outcome {
-        case .enqueued: UploadCoordinator.shared?.drainSoon()
-        case .held: break
-        case .holdFailed: scheduleRetry()   // kept in memory by the core service; must not wait for a relaunch
-        }
+        handle([outcome])   // .holdFailed: kept in memory by the core service; retried with backoff
         return outcome
     }
 
     /// A hold could not be persisted (e.g. disk full): retry soon, with backoff, while the process lives.
-    private func scheduleRetry(attempt: Int = 0) {
+    private func scheduleRetry() {
+        let start: Bool = { lock.lock(); defer { lock.unlock() }; let s = !retryLoopScheduled; retryLoopScheduled = true; return s }()
+        guard start else { return }   // a loop is already running; it re-checks every outcome
+        retryLoop(attempt: 0)
+    }
+
+    private func retryLoop(attempt: Int) {
         let delay = min(300.0, 15.0 * pow(2.0, Double(attempt)))
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            let results = self.handoffs.retryHeld(engine: self.engine)
-            if results.values.contains(.enqueued) { UploadCoordinator.shared?.drainSoon() }
-            if results.values.contains(where: { if case .holdFailed = $0 { return true }; return false }) {
-                self.scheduleRetry(attempt: attempt + 1)
+            let results = Array(self.handoffs.retryHeld(engine: self.engine).values)
+            if results.contains(.enqueued) { UploadCoordinator.shared?.drainSoon() }
+            if results.contains(where: { if case .holdFailed = $0 { return true }; return false }) {
+                self.retryLoop(attempt: attempt + 1)
+            } else {
+                self.lock.lock(); self.retryLoopScheduled = false; self.lock.unlock()
             }
         }
     }
@@ -105,7 +118,10 @@ final class CaptureStorage: @unchecked Sendable {
     func heldSummaries() -> [HeldHandoffSummary] { (try? handoffs.heldSummaries()) ?? [] }
 
     /// Explicit nurse discard (or consent stop / quarantine): the only path that shreds a held session.
-    func discard(_ sessionId: UUID, reason: DiscardReason) { try? handoffs.discard(sessionId: sessionId, reason: reason) }
+    func discard(_ sessionId: UUID, reason: DiscardReason) {
+        // Ownership is decided from the engine: never shred what the upload engine has registered.
+        try? handoffs.discard(sessionId: sessionId, reason: reason, engine: engine)
+    }
 
     /// Destroys sealed artefacts nobody will upload (attempts the device did not accept).
     func destroy(_ artefacts: [SealedStepArtefact]) {

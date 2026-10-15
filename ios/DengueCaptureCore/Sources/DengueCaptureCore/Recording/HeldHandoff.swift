@@ -264,16 +264,24 @@ public final class CaptureHandoffService {
         }
     }
 
-    /// Explicit nurse discard, consent stop (DS_REG_*) or quarantine. Shreds the session's artefacts unless the
-    /// engine already owns them (then only this record goes). An unreadable record is removed; its artefacts, now
-    /// unreferenced, are reclaimed by the next sweep.
-    public func discard(sessionId: UUID, reason: DiscardReason) throws {
+    /// Explicit nurse discard, consent stop (DS_REG_*) or quarantine.
+    ///
+    /// Ownership is decided from the ENGINE, not from the stored stage (which can lag: a failed `.engineOwned`
+    /// save, or a crash between the engine's record save and the end of `process`): if `engine` has a record for
+    /// the session, or any copy of the hold (memory or store) says `.engineOwned`, the artefacts are kept and only
+    /// the held record is removed. Otherwise the session's artefacts are shredded. An unreadable record is removed;
+    /// its artefacts, now unreferenced, are reclaimed by the next sweep (which only runs with an engine).
+    public func discard(sessionId: UUID, reason: DiscardReason, engine: UploadEngine?) throws {
         lock.lock(); defer { lock.unlock() }
-        if let p = memoryHolds.removeValue(forKey: sessionId), p.stage == .session {
-            for a in p.artefacts { destroy(a.sealed) }
-        }
-        if let p = try? store.load(sessionId), p.stage == .session {
-            for a in p.artefacts { destroy(a.sealed) }
+        let memory = memoryHolds.removeValue(forKey: sessionId)
+        let stored = try? store.load(sessionId)
+        let engineOwned = engine?.record(sessionId) != nil
+            || memory?.stage == .engineOwned || stored?.stage == .engineOwned
+        if !engineOwned {
+            var seen = Set<String>()
+            for a in (memory?.artefacts ?? []) + (stored?.artefacts ?? []) where seen.insert(a.sealed.keyId).inserted {
+                destroy(a.sealed)
+            }
         }
         try store.remove(sessionId)
     }

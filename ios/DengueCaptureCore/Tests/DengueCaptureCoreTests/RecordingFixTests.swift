@@ -309,7 +309,7 @@ final class RecordingFixTests: XCTestCase {
         let a = try sealedArtefacts(.neutralFace, in: dir.appendingPathComponent("sealed"))
         let p = pending(artefacts: a)
         _ = svc.submit(p, engine: nil)
-        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard)
+        try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: nil)
         XCTAssertTrue(a.allSatisfy { !alive($0) })
         XCTAssertEqual(try svc.heldSummaries(), [])
     }
