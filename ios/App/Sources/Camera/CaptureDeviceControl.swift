@@ -180,11 +180,12 @@ public final class AVCaptureDeviceControl: CaptureDeviceControl {
         get {
             guard let connection else { return .auto }  // fail closed
             if !connection.isVideoStabilizationSupported { return .off }  // nothing can be applied
-            switch connection.preferredVideoStabilizationMode {
+            // Read back what the connection actually applies (the preferred mode is only a request).
+            switch connection.activeVideoStabilizationMode {
             case .off: return .off
             case .standard: return .standard
-            case .cinematic, .cinematicExtended: return .cinematic
-            case .auto: return .auto
+            case .cinematic, .cinematicExtended, .cinematicExtendedEnhanced: return .cinematic
+            case .auto, .previewOptimized: return .auto
             @unknown default: return .auto
             }
         }

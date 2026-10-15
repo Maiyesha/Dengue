@@ -3,6 +3,13 @@ import CryptoKit
 import Security
 import DengueCaptureCore
 
+/// Type-erased private key agreement (Secure Enclave or software). File scope: a protocol cannot be nested in a
+/// class (compile-risk fix 4).
+private protocol Agreeing {
+    var publicKey: P256.KeyAgreement.PublicKey { get }
+    func sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey) throws -> SharedSecret
+}
+
 /// Per-artefact AES-256 keys wrapped by a P-256 key-agreement key.
 ///
 /// - Device: the wrapping key is created inside the Secure Enclave (non-exportable).
@@ -98,11 +105,6 @@ public final class SecureEnclaveKeyStore: KeyStore {
         return SymmetricKey(data: raw)
     }
 
-    /// Type-erased private key agreement (Secure Enclave or software).
-    private protocol Agreeing {
-        var publicKey: P256.KeyAgreement.PublicKey { get }
-        func sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey) throws -> SharedSecret
-    }
     private struct SEKey: Agreeing {
         let k: SecureEnclave.P256.KeyAgreement.PrivateKey
         var publicKey: P256.KeyAgreement.PublicKey { k.publicKey }

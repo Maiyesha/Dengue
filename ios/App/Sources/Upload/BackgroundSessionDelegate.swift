@@ -105,7 +105,7 @@ final class BackgroundPartUploader: NSObject, PartUploader, URLSessionTaskDelega
         task.taskDescription = partId
         task.countOfBytesClientExpectsToSend = part.length
         task.countOfBytesClientExpectsToReceive = 1024
-        return await withCheckedContinuation { cont in
+        return await withCheckedContinuation { (cont: CheckedContinuation<PartUploadOutcome, Never>) in
             lock.lock()
             waiters[task.taskIdentifier, default: []].append(cont)
             lock.unlock()
@@ -124,7 +124,7 @@ final class BackgroundPartUploader: NSObject, PartUploader, URLSessionTaskDelega
         guard let running = await session.allTasks.first(where: {
             $0.taskDescription == partId && ($0.state == .running || $0.state == .suspended)
         }) else { return nil }
-        return await withCheckedContinuation { cont in
+        return await withCheckedContinuation { (cont: CheckedContinuation<PartUploadOutcome, Never>) in
             lock.lock()
             if let o = finished.removeValue(forKey: partId) {   // finished between the two checks
                 persistFinishedLocked()
