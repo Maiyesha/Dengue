@@ -255,3 +255,17 @@ public final class Outbox {
         }
     }
 }
+
+extension Outbox {
+    /// The production outbox store (compile-risk fix 5: the choice lives in core, not in the app):
+    /// GRDB (SQLite, `outbox.sqlite`) where GRDB is available (Apple platforms), otherwise the file store
+    /// (`outbox/`, atomic JSON). Both live under `directory`.
+    public static func makeDefault(directory: URL, clock: OutboxClock) throws -> Outbox {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        #if canImport(GRDB)
+        return try Outbox(dbPath: directory.appendingPathComponent("outbox.sqlite").path, clock: clock)
+        #else
+        return Outbox(store: try FileOutboxStore(directory: directory.appendingPathComponent("outbox")), clock: clock)
+        #endif
+    }
+}
