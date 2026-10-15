@@ -568,6 +568,52 @@ final class UploadEngineTests: XCTestCase {
         XCTAssertTrue(fileExists(a))
     }
 
+    func testUserTokenExpiryKeepsCreateScanForRetryAndOtherSessionsContinue() async throws {
+        final class FailingCreate: DengueAPI {
+            let inner: FakeUploadAPI
+            var failFirst = true
+            init(_ i: FakeUploadAPI) { inner = i }
+            func createScan(_ r: CreateScanRequest, idempotencyKey: String) async throws -> CreateScanResponse {
+                if failFirst { failFirst = false; throw APIError.unauthorized }
+                return try await inner.createScan(r, idempotencyKey: idempotencyKey)
+            }
+            func getScan(id: UUID, auth: AuthKind) async throws -> ScanResponse { try await inner.getScan(id: id, auth: auth) }
+            func recapture(scanId: UUID, steps: [CaptureStepName], reason: String, idempotencyKey: String) async throws -> ScanResponse { try await inner.recapture(scanId: scanId, steps: steps, reason: reason, idempotencyKey: idempotencyKey) }
+            func declareArtefact(scanId: UUID, request: DeclareArtefactRequest, idempotencyKey: String) async throws -> DeclareArtefactResponse { try await inner.declareArtefact(scanId: scanId, request: request, idempotencyKey: idempotencyKey) }
+            func partURL(artefactId: UUID, part: Int) async throws -> PartURLResponse { try await inner.partURL(artefactId: artefactId, part: part) }
+            func completeArtefact(id: UUID, idempotencyKey: String) async throws -> CompleteArtefactResponse { try await inner.completeArtefact(id: id, idempotencyKey: idempotencyKey) }
+            func lookup(participantCode: String) async throws -> PatientLookup { try await inner.lookup(participantCode: participantCode) }
+            func roster(wardId: String) async throws -> Roster { try await inner.roster(wardId: wardId) }
+            func consentStatus(patientId: UUID) async throws -> ConsentStatus { try await inner.consentStatus(patientId: patientId) }
+            func postClinicalData(patientId: UUID, request: ClinicalDataRequest, idempotencyKey: String) async throws -> ClinicalDataResponse { try await inner.postClinicalData(patientId: patientId, request: request, idempotencyKey: idempotencyKey) }
+            func experimental(scanId: UUID) async throws -> ExperimentalResponse { try await inner.experimental(scanId: scanId) }
+            func reviewChallenge(scanId: UUID, action: ReviewAction, reasonCode: String?, note: String?) async throws -> ReviewChallengeResponse { try await inner.reviewChallenge(scanId: scanId, action: action, reasonCode: reasonCode, note: note) }
+            func review(scanId: UUID, challengeId: UUID, action: ReviewAction, reasonCode: String?, note: String?, webauthnAssertion: [String: JSONValue], idempotencyKey: String) async throws -> ReviewResponse { try await inner.review(scanId: scanId, challengeId: challengeId, action: action, reasonCode: reasonCode, note: note, webauthnAssertion: webauthnAssertion, idempotencyKey: idempotencyKey) }
+            func registerPushToken(deviceId: UUID, apnsToken: String, idempotencyKey: String) async throws { try await inner.registerPushToken(deviceId: deviceId, apnsToken: apnsToken, idempotencyKey: idempotencyKey) }
+            func deviceChallenge(idempotencyKey: String) async throws -> DeviceChallengeResponse { try await inner.deviceChallenge(idempotencyKey: idempotencyKey) }
+            func attest(keyId: String, attestation: String, challenge: String, wardId: String, idempotencyKey: String) async throws -> AttestResponse { try await inner.attest(keyId: keyId, attestation: attestation, challenge: challenge, wardId: wardId, idempotencyKey: idempotencyKey) }
+            func assert(deviceId: UUID, assertion: String, challenge: String, asUser: Bool) async throws -> AssertResponse { try await inner.assert(deviceId: deviceId, assertion: assertion, challenge: challenge, asUser: asUser) }
+            func renewalChallenge(deviceId: UUID) async throws -> DeviceChallengeResponse { try await inner.renewalChallenge(deviceId: deviceId) }
+        }
+        let engine = makeEngine(api: FailingCreate(api))
+        var userFailures = 0
+        engine.onUserAuthFailure = { userFailures += 1 }
+        let a = try makeArtefact(size: 300)
+        let s1 = try enqueue(engine, [a])
+        let b = try makeArtefact(size: 300)
+        let s2 = UUID()
+        try engine.enqueueSession(sessionId: s2, participantCode: participantCode, createScan: nil,
+                                  scanId: UUID(), artefacts: [b])
+        await engine.drain()
+        XCTAssertEqual(userFailures, 1)
+        XCTAssertEqual(try outbox.items(sessionId: s1).map { $0.status }, [.pending, .pending, .pending, .pending],
+                       "nothing failed; waits for sign-in")
+        XCTAssertEqual(engine.record(s2)?.verdict, .awaitingVerdict, "other session still uploaded")
+        clock.wallNow = clock.wallNow.addingTimeInterval(3600)
+        await engine.drain()
+        XCTAssertEqual(engine.record(s1)?.verdict, .awaitingVerdict)
+    }
+
     func testMissingLocalFileFailsArtefactWithoutLooping() async throws {
         let engine = makeEngine()
         let a = try makeArtefact(size: 300)

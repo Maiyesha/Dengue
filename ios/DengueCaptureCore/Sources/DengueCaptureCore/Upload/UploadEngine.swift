@@ -35,6 +35,10 @@ public final class UploadEngine {
     /// Called when an artefact route is refused for the device token (DS_DEVICE_00x). The item is kept for
     /// retry; the app should renew the token (or re-enrol) and drain again.
     public var onDeviceAuthFailure: ((APIError) -> Void)?
+    /// Called when a user-token route (createScan, recapture, clinical data) gets 401. The item is kept for
+    /// retry (an offline capture often uploads after the nurse's session expired); the app should prompt
+    /// sign-in. Other sessions' device-token uploads continue.
+    public var onUserAuthFailure: (() -> Void)?
 
     public init(outbox: Outbox, api: DengueAPI, sessions: UploadSessionStore, keys: KeyStore,
                 uploader: PartUploader, notifier: RepeatNotifier, partSize: Int64 = UploadPart.defaultSize) {
@@ -263,6 +267,11 @@ public final class UploadEngine {
             _ = try? outbox.apply(.retryable, to: item.id)
             onDeviceAuthFailure?(e)
             return false
+        }
+        if !Self.isDeviceRoute(item.kind), e == .unauthorized {
+            _ = try? outbox.apply(.retryable, to: item.id)
+            onUserAuthFailure?()
+            return true
         }
         guard let action = try? outbox.apply(e, to: item.id) else { return false }
         switch action {
