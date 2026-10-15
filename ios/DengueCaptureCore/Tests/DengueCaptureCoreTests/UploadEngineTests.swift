@@ -91,12 +91,15 @@ final class FakePartUploader: PartUploader {
     var outcomes: [Int: [PartUploadOutcome]] = [:]
     var existing: [String: PartUploadOutcome] = [:]
     var bytesSeen: [Int: Data] = [:]
+    /// When set, every upload waits on it (to hold a drain mid-flight).
+    var gate: Gate?
 
     init(log: EventLog) { self.log = log }
 
     func upload(file: URL, part: UploadPart, to url: URL, partId: String) async -> PartUploadOutcome {
         log.events.append("upload \(part.number)")
         calls.append(Call(file: file, part: part, url: url, partId: partId))
+        if let gate { await gate.wait() }
         if let h = try? FileHandle(forReadingFrom: file) {
             try? h.seek(toOffset: UInt64(part.offset))
             bytesSeen[part.number] = (try? h.read(upToCount: Int(part.length))) ?? Data()
@@ -668,10 +671,10 @@ final class UploadEngineTests: XCTestCase {
         uploader.outcomes[1] = [.transportError]
         try enqueue(engine, [a])
         let wake = await engine.drain()
-        XCTAssertEqual(wake, clock.wallNow.addingTimeInterval(Outbox.backoff(attempts: 1)))
+        XCTAssertEqual(wake, .done(nextWakeAt: clock.wallNow.addingTimeInterval(Outbox.backoff(attempts: 1))))
         clock.wallNow = clock.wallNow.addingTimeInterval(3600)
         let wake2 = await engine.drain()
-        XCTAssertNil(wake2)
+        XCTAssertEqual(wake2, .done(nextWakeAt: nil))
     }
 
     func testNextWakeIgnoresFrozenSessions() async throws {
@@ -691,8 +694,9 @@ final class UploadEngineTests: XCTestCase {
         let a = try makeArtefact(size: 300)
         try enqueue(engine, [a])
         var checks = 0
-        let wake = await engine.drain(shouldContinue: { checks += 1; return checks <= 1 })
+        let result = await engine.drain(shouldContinue: { checks += 1; return checks <= 1 })
         XCTAssertEqual(log.events, ["createScan"])
+        guard case .done(let wake) = result else { return XCTFail("expected .done") }
         let w = try XCTUnwrap(wake, "remaining work is due now")
         XCTAssertLessThanOrEqual(w, clock.wallNow)
     }
@@ -768,6 +772,60 @@ final class UploadEngineTests: XCTestCase {
         XCTAssertEqual(notifier.texts.count, 2, "only the two repeat rows notify")
     }
 
+    // MARK: fix round 2
+
+    /// N1: a drain started while another runs reports `.skipped`, not "nothing pending".
+    func testConcurrentDrainReturnsSkipped() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        try enqueue(engine, [a])
+        let gate = Gate()
+        uploader.gate = gate
+        let first = Task { await engine.drain() }
+        while !gate.hasWaiter { await Task.yield() }
+        let second = await engine.drain()
+        XCTAssertEqual(second, .skipped)
+        gate.open()
+        let firstResult = await first.value
+        XCTAssertEqual(firstResult, .done(nextWakeAt: nil))
+    }
+
+    /// R1 (round 2): full DS_QG_099 (nothing recaptured) leaves only verified + abandoned artefacts: destroyed.
+    func testFullRecaptureExhaustedMarksSessionDestroyed() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        let s = try enqueue(engine, [a])
+        await engine.drain()
+        let rFace = try makeArtefact(size: 400, step: .neutralFace)
+        api.recaptureErrors = [.recaptureExhausted(unableToAcquire: ["neutral_face"], recaptured: [], status: "partial")]
+        api.scanResponse = try scan(status: .partial, steps: [("neutral_face", nil, [])])
+        try engine.enqueueRecapture(sessionId: s, steps: [.neutralFace], reason: "DS_QG_002", artefacts: [rFace])
+        XCTAssertEqual(engine.record(s)?.localDataDestroyed, false)
+        await engine.drain()
+        let rec = try XCTUnwrap(engine.record(s))
+        XCTAssertEqual(rec.artefacts.map { $0.status }, [.verified, .abandoned])
+        XCTAssertTrue(rec.localDataDestroyed)
+        XCTAssertFalse(fileExists(rFace) || keyExists(rFace))
+        XCTAssertEqual(rec.verdict, .closed)
+        XCTAssertTrue(notifier.texts.isEmpty)
+    }
+
+    /// R2: item-level needsRepeat on a non-artefact item repeats all core steps.
+    func testItemNeedsRepeatOnNonArtefactItemFallsBackToCoreSteps() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        let s = try enqueue(engine, [a])
+        await engine.drain()
+        api.recaptureErrors = [.needsRepeat([.dsQG003])]
+        try engine.enqueueRecapture(sessionId: s, steps: [.neutralFace], reason: "DS_QG_002", artefacts: [])
+        await engine.drain()
+        let rec = try XCTUnwrap(engine.record(s))
+        XCTAssertEqual(rec.verdict, .needsRepeat)
+        XCTAssertEqual(rec.repeatSteps, [.neutralFace, .fingertipPPG])
+        XCTAssertEqual(rec.repeatReasons, [.dsQG003])
+        XCTAssertEqual(notifier.texts, ["A recording for \u{2022}\u{2022}417 needs repeating"])
+    }
+
     func testFileSessionStoreSurvivesReopen() throws {
         let d = dir.appendingPathComponent("sessions")
         let a = try makeArtefact(size: 10)
@@ -798,6 +856,7 @@ final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    var hasWaiter: Bool { lock.lock(); defer { lock.unlock() }; return !waiters.isEmpty }
     func wait() async {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             lock.lock()

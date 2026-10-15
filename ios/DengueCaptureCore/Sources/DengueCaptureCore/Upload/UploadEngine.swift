@@ -1,5 +1,13 @@
 import Foundation
 
+/// Outcome of `UploadEngine.drain`.
+public enum DrainResult: Equatable {
+    /// Another drain was already running; it will report. Callers must not change their wake schedule.
+    case skipped
+    /// This drain ran. `nextWakeAt`: when to drain again (possibly already due); nil = nothing pending.
+    case done(nextWakeAt: Date?)
+}
+
 public enum UploadEngineError: Error, Equatable {
     /// `enqueueSession` needs either a createScan request or a known scan id.
     case noScan
@@ -102,7 +110,7 @@ public final class UploadEngine {
     /// Call at app launch (after the device token is renewed if due): recovers interrupted items, finishes
     /// interrupted quarantines and local-data destruction, then drains.
     @discardableResult
-    public func launch(shouldContinue: @escaping () -> Bool = { true }) async -> Date? {
+    public func launch(shouldContinue: @escaping () -> Bool = { true }) async -> DrainResult {
         try? outbox.recoverInFlight()
         for s in (try? outbox.pendingQuarantineSessions()) ?? [] {
             finishQuarantine(s)
@@ -122,13 +130,13 @@ public final class UploadEngine {
     /// Processes ready outbox items in order until none is ready, or until `shouldContinue` returns false
     /// (checked before each item; e.g. the app's background time expired).
     /// Returns when to drain again (`Outbox.nextWakeAt`, possibly already due), or nil when nothing is pending.
-    /// A concurrent call returns nil immediately; the running drain reports.
+    /// A concurrent call returns `.skipped` immediately; the running drain reports.
     @discardableResult
-    public func drain(shouldContinue: @escaping () -> Bool = { true }) async -> Date? {
-        guard beginDrain() else { return nil }
+    public func drain(shouldContinue: @escaping () -> Bool = { true }) async -> DrainResult {
+        guard beginDrain() else { return .skipped }
         await drainLoop(shouldContinue)
         endDrain()
-        return try? outbox.nextWakeAt()
+        return .done(nextWakeAt: try? outbox.nextWakeAt())
     }
 
     private func drainLoop(_ shouldContinue: () -> Bool) async {
@@ -297,7 +305,8 @@ public final class UploadEngine {
         case .needsRepeat:
             if case .needsRepeat(let reasons) = e {
                 let step = (try? artefact(for: item))?.1.step
-                markRepeat(item.sessionId, reasons: reasons, steps: step.map { [$0] } ?? [])
+                // Non-artefact item (createScan, recapture, clinical data): the server did not name a step.
+                markRepeat(item.sessionId, reasons: reasons, steps: step.map { [$0] } ?? Self.coreSteps)
             }
         case .failed:
             if Self.isArtefactKind(item.kind) { markArtefactsFailed(item) }
@@ -332,6 +341,7 @@ public final class UploadEngine {
             let destroyed = destroyLocal([a])
             try? updateArtefact(sessionId, a.localId) { $0.status = destroyed ? .abandoned : .failed }
         }
+        destroyIfAllVerified(sessionId)   // only verified + abandoned left: the session's local data is gone
     }
 
     // MARK: quarantine and destruction
@@ -349,8 +359,8 @@ public final class UploadEngine {
 
     private func destroyIfAllVerified(_ sessionId: UUID) {
         recordLock.lock(); defer { recordLock.unlock() }
-        guard let rec = record(sessionId), !rec.localDataDestroyed,
-              rec.artefacts.contains(where: { $0.status == .verified }),
+        // Every artefact finished: verified, or abandoned (never uploadable, already destroyed).
+        guard let rec = record(sessionId), !rec.localDataDestroyed, !rec.artefacts.isEmpty,
               rec.artefacts.allSatisfy({ $0.status == .verified || $0.status == .abandoned }) else { return }
         let ok = destroyLocal(rec.artefacts)
         try? update(sessionId) {

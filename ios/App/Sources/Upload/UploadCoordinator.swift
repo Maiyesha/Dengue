@@ -224,7 +224,12 @@ final class UploadCoordinator: @unchecked Sendable {
 
     /// Re-drains at the engine's `nextWakeAt` (earliest retry backoff). In the background the app is usually
     /// suspended before this fires; launch, pushes and background-session events drain then.
-    private func scheduleWake(_ at: Date?) {
+    ///
+    /// `.skipped` (another drain is running and will report) leaves the schedule untouched. A wake task removes
+    /// itself from `wakeTask` under the lock before it drains, so a later reschedule can never cancel a
+    /// wake task mid-drain (a cancelled task would turn every request into a retryable error).
+    private func scheduleWake(_ result: DrainResult) {
+        guard case .done(let at) = result else { return }
         lock.lock(); defer { lock.unlock() }
         wakeTask?.cancel()
         wakeTask = nil
@@ -232,7 +237,15 @@ final class UploadCoordinator: @unchecked Sendable {
         let delay = max(1.0, at.timeIntervalSinceNow)   // never a hot loop on already-due work
         wakeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled, let self else { return }
+            guard let self else { return }
+            let stillScheduled: Bool = {
+                self.lock.lock(); defer { self.lock.unlock() }
+                // Not cancelled => still the current wakeTask (rescheduling cancels under this same lock).
+                guard !Task.isCancelled else { return false }
+                self.wakeTask = nil
+                return true
+            }()
+            guard stillScheduled else { return }
             await self.withBackgroundTime { sc in await self.drain(shouldContinue: sc) }
         }
     }
