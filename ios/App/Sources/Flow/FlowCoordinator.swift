@@ -23,6 +23,15 @@ struct APIConsentSource: ConsentSource {
     }
 }
 
+/// Resolves the API consent source at lookup time, so a later MDM `api_base_url` needs no relaunch.
+struct LiveConsentSource: ConsentSource {
+    func consent(for participantCode: String) async
+        -> (status: ConsentStatus, snapshotAt: Date, online: Bool, patientId: UUID?) {
+        if let c = UploadCoordinator.shared { return await APIConsentSource(service: c.consent).consent(for: participantCode) }
+        return await UnconfiguredConsentSource().consent(for: participantCode)
+    }
+}
+
 /// Uploads (and therefore the API) not provisioned by MDM yet: capture is blocked (fail closed).
 struct UnconfiguredConsentSource: ConsentSource {
     func consent(for participantCode: String) async
@@ -118,9 +127,7 @@ final class FlowCoordinator: ObservableObject {
                 camera: FakeCamera(), experimentalEnabled: env["UITEST_EXPERIMENTAL"] == "1", handoffEnabled: false)
         }
         // Production (C2): DengueAPI-backed consent; blocked until MDM provisions the API.
-        let consent: ConsentSource = UploadCoordinator.shared.map { APIConsentSource(service: $0.consent) }
-            ?? UnconfiguredConsentSource()
-        return FlowCoordinator(flow: flow, consentSource: consent, camera: CameraRecorder.shared)
+        return FlowCoordinator(flow: flow, consentSource: LiveConsentSource(), camera: CameraRecorder.shared)
     }
 
     /// I2: a repeat recording of `r.steps` for an existing session (ends in `UploadEngine.enqueueRecapture`).
