@@ -10,6 +10,9 @@ public enum APIError: Error, Equatable {
     case retryable
     case invalid(code: String)
     case uploadHashMismatch
+    /// DS_UPLOAD_005 (409, retryable): the server has fewer bytes than declared. Upload the missing parts,
+    /// then complete again with the same idempotency key. Outbox treats it exactly like `.retryable`.
+    case uploadIncomplete
     /// DS_QG_099: max recaptures reached; the server committed (steps marked UNABLE_TO_ACQUIRE). Refetch the scan.
     case recaptureExhausted(unableToAcquire: [String], recaptured: [String], status: String)
 
@@ -34,7 +37,8 @@ public enum APIError: Error, Equatable {
         switch code {
         case "DS_SCAN_001": return .duplicateRecent
         case "DS_UPLOAD_001": return .uploadHashMismatch
-        case "DS_UPLOAD_005", "DS_RATE_001", "DS_AUD_001", "DS_IDEMPOTENCY_003": return .retryable
+        case "DS_UPLOAD_005": return .uploadIncomplete
+        case "DS_RATE_001", "DS_AUD_001", "DS_IDEMPOTENCY_003": return .retryable
         case "DS_DEVICE_001": return .reEnrol
         case "DS_DEVICE_002", "DS_DEVICE_003", "DS_DEVICE_004", "DS_DEVICE_005", "DS_AUTH_003":
             return .unauthorized

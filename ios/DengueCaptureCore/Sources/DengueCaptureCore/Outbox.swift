@@ -133,7 +133,7 @@ public final class Outbox {
     public func apply(_ e: APIError, to id: UUID) throws -> OutboxAction {
         guard let it = try item(id) else { return .failed }
         switch e {
-        case .retryable:
+        case .retryable, .uploadIncomplete:
             if Outbox.isFrozen(it.status) { return .ignoredFrozen }
             try markRetry(id)
             return .retryScheduled

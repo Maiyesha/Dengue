@@ -165,7 +165,7 @@ final class APIErrorTests: XCTestCase {
             ("DS_SEG_001", 422, .needsRepeat([.dsSEG001])),
             ("DS_SCAN_001", 409, .duplicateRecent),
             ("DS_UPLOAD_001", 422, .uploadHashMismatch),
-            ("DS_UPLOAD_005", 409, .retryable),
+            ("DS_UPLOAD_005", 409, .uploadIncomplete),
             ("DS_RATE_001", 429, .retryable),
             ("DS_AUD_001", 400, .retryable),
             ("DS_ANY", 503, .retryable),

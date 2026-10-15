@@ -66,6 +66,7 @@ public enum NurseCopy {
     public static let recentScan = "This patient was recorded in the last 30 min"
     public static let repeatNoticeLead = "Recording for study ID"
     public static let repeatNoticeTail = "needs repeating"
+    public static let repeatNotificationLead = "A recording for"
 
     // Reference / experimental display
     public static let monitorPrefix = "Monitor pulse"
@@ -148,6 +149,16 @@ public enum NurseCopy {
         "\(repeatNoticeLead) \(maskedStudyID) \(repeatNoticeTail) (\(reason))."
     }
 
+    /// "••" + the last 3 characters of the participant code. Nothing else of the code is ever shown.
+    public static func maskedStudyID(_ participantCode: String) -> String {
+        "\u{2022}\u{2022}" + String(participantCode.suffix(3))
+    }
+
+    /// Local notification text, e.g. "A recording for ••417 needs repeating". No other identifier.
+    public static func repeatNotification(maskedStudyID: String) -> String {
+        "\(repeatNotificationLead) \(maskedStudyID) \(repeatNoticeTail)"
+    }
+
     /// The two strings exempt from the forbidden-word lint.
     public static let allowlisted: [String] = [banner, experimentalNotice]
 
@@ -164,7 +175,7 @@ public enum NurseCopy {
             patientDeclined, disinfectReminder, phoneWarm,
             statusGood, recordAgainLead, recordAgainTail, statusCouldNotRecord, stepPassed, stepRecordAgain,
             cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
-            recentScan, repeatNoticeLead, repeatNoticeTail,
+            recentScan, repeatNoticeLead, repeatNoticeTail, repeatNotificationLead,
             monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,
             skipMonitorUnavailable, skipPatientNotOnMonitor, labelStudyID, labelBed, buttonLookUp,
             buttonContinue, buttonAgree, buttonDecline, buttonStart, buttonPause, buttonSkip, buttonDone,

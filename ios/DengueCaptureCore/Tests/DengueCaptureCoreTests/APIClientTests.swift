@@ -206,7 +206,7 @@ final class APIClientTests: XCTestCase {
     func testOtherCodes() async {
         await assertError(409, envelope("DS_SCAN_001"), .duplicateRecent)
         await assertError(409, envelope("DS_UPLOAD_001"), .uploadHashMismatch)
-        await assertError(409, envelope("DS_UPLOAD_005"), .retryable)
+        await assertError(409, envelope("DS_UPLOAD_005"), .uploadIncomplete)
         await assertError(429, envelope("DS_RATE_001"), .retryable)
         await assertError(401, envelope("DS_DEVICE_001"), .reEnrol)
         await assertError(500, envelope("DS_INTERNAL_001"), .retryable)
