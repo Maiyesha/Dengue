@@ -101,6 +101,14 @@ final class CaptureStorage: @unchecked Sendable {
 
     func checkpoint(_ p: PendingHandoff) { try? handoffs.checkpoint(p) }
 
+    /// R-2: sign-in required during capture: persist the session's accepted attempts now (core rule).
+    func checkpointForReauth(_ p: PendingHandoff) { try? handoffs.checkpointForReauth(p) }
+
+    /// R-2: an interrupted partial clip of a session this process no longer checkpoints (repeat, or handed off).
+    func keepInterruptedClip(_ clip: InterruptedClip, sessionId: UUID, maskedCode: String, capturedAt: Date) {
+        try? handoffs.keepInterruptedClip(clip, sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt)
+    }
+
     @discardableResult
     func submit(_ p: PendingHandoff) -> HandoffOutcome {
         let outcome = handoffs.submit(p, engine: engine)

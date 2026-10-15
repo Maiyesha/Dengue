@@ -95,6 +95,11 @@ final class FlowCoordinator: ObservableObject {
     private var acceptedFaceMetadata: CaptureMetadata?
     private var lastMetadata: CaptureMetadata?
     private var handedOff = false
+    /// R-2: partial recordings stopped by a sign-in requirement before the step minimum (kept, never uploaded).
+    private var interruptedClips: [InterruptedClip] = []
+    /// R-2: the recording being ended early because sign-in became required.
+    private var authStopping: RecordingSession?
+    nonisolated(unsafe) private var authObservers: [NSObjectProtocol] = []
 
     /// Bumped after every flow mutation so SwiftUI re-reads the (non-observable) CaptureFlow.
     @Published private(set) var revision = 0
@@ -114,6 +119,21 @@ final class FlowCoordinator: ObservableObject {
             sessionId = r.sessionId
             flow.beginRepeat(maskedCode: r.maskedCode)
         }
+        // R-2: sign-in is an overlay above this flow; the coordinator lives on and reacts to it.
+        let nc = NotificationCenter.default
+        authObservers = [
+            nc.addObserver(forName: .dsSignInRequired, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.authRequired() }
+            },
+            nc.addObserver(forName: .dsSignInRestored, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.authRestored() }
+            },
+        ]
+        if SignInOverlayModel.shared.required { flow.authRequired() }
+    }
+
+    deinit {
+        for o in authObservers { NotificationCenter.default.removeObserver(o) }
     }
 
     static var isUITest: Bool { ProcessInfo.processInfo.environment["UITEST_FAKE_CAMERA"] == "1" }
@@ -207,7 +227,8 @@ final class FlowCoordinator: ObservableObject {
     /// Runs the camera's positioning (preview, auto exposure, guidance) for the step being positioned.
     /// Called by the capture screen on appear and after every change.
     func ensurePositioning() {
-        guard flow.screen == .capture, case .positioning(let step)? = flow.machineState, !flow.thermalHold else {
+        guard flow.screen == .capture, case .positioning(let step)? = flow.machineState, !flow.thermalHold,
+              !flow.authPending else {
             if currentRecording == nil { positioningStep = nil }
             return
         }
@@ -244,13 +265,74 @@ final class FlowCoordinator: ObservableObject {
 
     func thermalChanged(_ l: ThermalLevel) { flow.thermalChanged(l); refresh() }
 
+    // MARK: sign-in required (R-2)
+
+    /// The sign-in overlay went up. The flow is kept; nothing new can start (core `CaptureFlow.authRequired`).
+    /// - A live recording is ended safely: `finishEarly` finishes the asset writer and turns the torch off; its
+    ///   result is decided in `finishStep` (core `recordingStoppedForAuth`: evaluated if past the step minimum,
+    ///   otherwise kept as an interrupted clip without consuming the attempt).
+    /// - Otherwise the camera (preview, torch) is stopped.
+    /// - The session's accepted attempts are checkpointed to the held store at once.
+    func authRequired() {
+        flow.authRequired()
+        positioningStep = nil
+        if let rec = currentRecording, isRecording(rec) {
+            authStopping = rec
+            camera.finishEarly(rec)
+        }
+        camera.stop()   // queued after finishEarly on the camera's queues: positioning off, session stopped, torch off
+        checkpointForReauth()
+        refresh()
+    }
+
+    /// Sign-in succeeded: continue at the same step (the capture screen restarts positioning).
+    func authRestored() {
+        flow.authRestored()
+        refresh()
+    }
+
+    /// R-2: the accepted attempts (and interrupted clips) of this session, persisted now as an open checkpoint.
+    /// Not for a server-requested repeat (R-3: a repeat never writes a hand-off for the original session).
+    private func checkpointForReauth() {
+        guard handoffEnabled, repeatRequest == nil, !handedOff, let storage = CaptureStorage.shared else { return }
+        storage.checkpointForReauth(pending(artefacts: sealedSoFar))
+    }
+
+    /// R-2: seals nothing new (the recorder already started sealing); files the sealed partial clip as an
+    /// `InterruptedClip` of this session's held record. Never uploaded; deleted only by a nurse discard.
+    private func keepInterruptedClip(_ r: StepRecording, step: CaptureStep, attempt: Int) {
+        guard handoffEnabled, let sealing = r.sealing, let storage = CaptureStorage.shared else {
+            Self.discardSealing(r)   // UI tests: nothing was sealed
+            return
+        }
+        let session = sessionId
+        let masked = NurseCopy.maskedStudyID(flow.participantCode ?? "")
+        let captured = capturedAt ?? Date()
+        let repeating = repeatRequest != nil
+        let seconds = r.duration
+        Task { [weak self] in
+            let arts = await sealing.value
+            let clip = InterruptedClip(step: step, attempt: attempt, recordedSeconds: seconds, interruptedAt: Date(),
+                                       artefacts: arts)
+            guard let self, !repeating, self.sessionId == session, !self.handedOff else {
+                // A repeat (R-3: no checkpoint of the original session), or the session already moved on:
+                // keep the clip in the session's held record (or a clip-only record).
+                storage.keepInterruptedClip(clip, sessionId: session, maskedCode: masked, capturedAt: captured)
+                return
+            }
+            self.interruptedClips.append(clip)
+            self.checkpointForReauth()
+        }
+    }
+
     /// Next patient. A session that recorded anything but was not handed off yet is handed off now (held if it
     /// cannot be queued): nothing captured is ever shredded here.
     func reset() {
         if let rec = currentRecording { currentRecording = nil; camera.cancel(rec) }
+        authStopping = nil
         camera.stop()
-        if !flow.attemptLog.isEmpty { handOff() }
-        acceptedSealing = []; sealedSoFar = []; faceSummary = nil
+        if !flow.attemptLog.isEmpty || !interruptedClips.isEmpty { handOff() }
+        acceptedSealing = []; sealedSoFar = []; faceSummary = nil; interruptedClips = []
         acceptedFaceMetadata = nil; lastMetadata = nil; handedOff = false
         sessionId = UUID(); patientId = nil; offline = false; capturedAt = nil; cameraMessage = nil
         flow.reset(); experimental = nil; showOutbox = false; refresh()
@@ -302,6 +384,13 @@ final class FlowCoordinator: ObservableObject {
             } catch {
                 guard let self, self.currentRecording === rec else { return }   // paused: already handled
                 self.currentRecording = nil
+                if self.authStopping === rec {
+                    // R-2: ended for sign-in before any frame was written: nothing to keep, attempt not consumed.
+                    self.authStopping = nil
+                    _ = self.flow.recordingStoppedForAuth(recordedSeconds: 0)
+                    self.refresh()
+                    return
+                }
                 self.flow.pause()   // attempt not consumed; the nurse retries
                 self.cameraMessage = NurseCopy.cameraNotReady
                 self.refresh()
@@ -316,10 +405,29 @@ final class FlowCoordinator: ObservableObject {
 
     private func finishStep(_ r: StepRecording, rec: RecordingSession, config: StepConfig) async {
         guard currentRecording === rec, isRecording(rec) else { Self.discardSealing(r); return }
+        if authStopping === rec {
+            // R-2: ended early because sign-in became required. The core decides from the recorded duration.
+            authStopping = nil
+            switch flow.recordingStoppedForAuth(recordedSeconds: r.duration) {
+            case .finishAndEvaluate:
+                break   // past the step minimum: evaluated below like any finished recording
+            case .keepPartialClip(let step, let attempt):
+                currentRecording = nil   // attempt not consumed; back at the same step under the overlay
+                keepInterruptedClip(r, step: step, attempt: attempt)
+                refresh()
+                return
+            case .notRecording:
+                currentRecording = nil
+                Self.discardSealing(r)
+                refresh()
+                return
+            }
+        }
         // Provisional on-device verdict off the main thread (the pulse gate is a DFT). Never yields a pulse rate.
         let verdict = await Task.detached { StepQualityInput(trace: r.trace, config: config).verdict() }.value
         guard currentRecording === rec, isRecording(rec) else { Self.discardSealing(r); refresh(); return }
         currentRecording = nil
+        if authStopping === rec { authStopping = nil }   // sign-in arrived after the full recording: evaluated as is
         lastMetadata = r.metadata
         if r.step == .neutralFace, let p = r.positioning { faceSummary = p }
         flow.stepRecorded(duration: r.duration)
@@ -353,13 +461,15 @@ final class FlowCoordinator: ObservableObject {
     // MARK: hand-off
 
     private func pending(artefacts: [SealedStepArtefact]) -> PendingHandoff {
-        PendingHandoff(
+        var p = PendingHandoff(
             sessionId: sessionId, patientId: patientId,
             maskedCode: NurseCopy.maskedStudyID(flow.participantCode ?? ""),
             capturedAt: capturedAt ?? Date(), offline: offline,
             protocolVersion: CaptureProtocol.phaseADefault.version,
             attempts: flow.attemptLog, vitals: flow.vitalRecords, artefacts: artefacts,
             metadata: acceptedFaceMetadata ?? lastMetadata, isOpen: true)
+        p.interruptedClips = interruptedClips   // R-2
+        return p
     }
 
     /// Session over: wait for sealing, then `CaptureStorage.submit` (enqueued, or held; never shredded).

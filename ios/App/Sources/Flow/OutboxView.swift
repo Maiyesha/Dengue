@@ -37,6 +37,7 @@ struct OutboxView: View {
                 .padding()
             }
         }
+        .signInOverlay()   // R-2
         .onAppear(perform: reload)
         .onReceive(tick) { _ in reloadSessions() }
         .fullScreenCover(item: $repeatRequest, onDismiss: reload) { r in RepeatFlowView(request: r) }
@@ -76,7 +77,12 @@ struct OutboxView: View {
         HStack {
             VStack(alignment: .leading) {
                 if !h.isUnreadable { Text(h.maskedCode).font(.headline) }
-                Text(h.isUnreadable ? NurseCopy.heldUnreadable : NurseCopy.heldWaiting)
+                if !h.isInterruptedOnly {
+                    Text(h.isUnreadable ? NurseCopy.heldUnreadable : NurseCopy.heldWaiting)
+                }
+                if h.interruptedClipCount > 0 {   // R-2: kept on the phone, never uploaded
+                    Text(NurseCopy.interruptedClipKept).accessibilityIdentifier("interrupted-clip")
+                }
                 if h.unsentTooLong(now: Date()) {
                     Text(NurseCopy.unsentWarning).foregroundColor(.orange).accessibilityIdentifier("unsent-warning")
                 }

@@ -33,6 +33,10 @@ protocol CaptureCameraProviding: AnyObject {
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording
     /// Discards the partial recording of exactly this attempt.
     func cancel(_ rec: RecordingSession)
+    /// R-2 (sign-in required while recording): ends exactly this attempt NOW but keeps what was recorded: the
+    /// asset writer is finished and the torch turned off, and `record` returns the shorter `StepRecording` (with
+    /// its sealing). If nothing was recorded yet, `record` throws as for `cancel`.
+    func finishEarly(_ rec: RecordingSession)
     /// Stops the camera (and torch) between sessions.
     func stop()
 }
@@ -88,5 +92,7 @@ final class FakeCamera: CaptureCameraProviding {
     }
 
     func cancel(_ rec: RecordingSession) { rec.finish() }
+    /// The fake records synchronously: there is never a live attempt to end early.
+    func finishEarly(_ rec: RecordingSession) {}
     func stop() {}
 }

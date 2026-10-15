@@ -31,4 +31,9 @@ extension Notification.Name {
     static let dsUserAuthFailed = Notification.Name("ai.reainmaker.denguecapture.userAuthFailed")
     /// A server-requested repeat arrived while the app is in the foreground (in-app banner, I2).
     static let dsRepeatRequested = Notification.Name("ai.reainmaker.denguecapture.repeatRequested")
+    /// R-2: the sign-in overlay went up (posted by `SessionModel` on the main thread). Live capture flows stop
+    /// recording safely, keep what was recorded and wait under the overlay; they are never torn down.
+    static let dsSignInRequired = Notification.Name("ai.reainmaker.denguecapture.signInRequired")
+    /// R-2: sign-in succeeded after `dsSignInRequired`: the flows continue at the same step.
+    static let dsSignInRestored = Notification.Name("ai.reainmaker.denguecapture.signInRestored")
 }

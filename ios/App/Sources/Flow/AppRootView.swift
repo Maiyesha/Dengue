@@ -1,8 +1,45 @@
 import SwiftUI
 import DengueCaptureCore
 
-/// App root (C2): sign-in gate, idle lock overlay, screen-capture blur, app-switcher privacy cover, and the
+/// R-2: whether the sign-in overlay is up, shared by every presentation (root, Uploads sheet, repeat flow cover),
+/// so sign-in always covers the live flow without tearing it down. Updated by `SessionModel.evaluate`.
+@MainActor
+final class SignInOverlayModel: ObservableObject {
+    static let shared = SignInOverlayModel()
+    @Published private(set) var required = false
+    private(set) weak var session: SessionModel?
+
+    func update(required: Bool, session: SessionModel) {
+        self.session = session
+        if self.required != required { self.required = required }
+    }
+}
+
+/// R-2: covers its content with SignInView while sign-in is required. The content (and its FlowCoordinator) stays
+/// alive underneath.
+struct SignInOverlayModifier: ViewModifier {
+    @ObservedObject private var model = SignInOverlayModel.shared
+    func body(content: Content) -> some View {
+        content.overlay {
+            if model.required, let s = model.session {
+                ZStack {
+                    Color(.systemBackground).ignoresSafeArea()
+                    SignInView(session: s)
+                }
+                .accessibilityIdentifier("sign-in-overlay")
+            }
+        }
+    }
+}
+
+extension View {
+    /// R-2: sign-in overlay above this view (never replaces it).
+    func signInOverlay() -> some View { modifier(SignInOverlayModifier()) }
+}
+
+/// App root (C2): sign-in overlay, idle lock overlay, screen-capture blur, app-switcher privacy cover, and the
 /// foreground needs-repeat banner. Every screen keeps the RUO banner.
+/// R-2: the capture flow is never torn down by auth state: sign-in is an overlay above it.
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 struct AppRootView: View {
@@ -14,14 +51,9 @@ struct AppRootView: View {
 
     var body: some View {
         ZStack {
-            switch session.gate {
-            case .signInRequired:
-                SignInView(session: session)
-            case .open, .locked:
-                FlowRootView()
-                    .simultaneousGesture(TapGesture().onEnded { session.activity() })
-                if session.gate == .locked { LockOverlay(session: session) }
-            }
+            FlowRootView()
+                .simultaneousGesture(TapGesture().onEnded { session.activity() })
+            if session.gate == .locked { LockOverlay(session: session) }
             if let text = repeatBanner, session.gate == .open {
                 VStack {
                     Spacer().frame(height: 60)
@@ -37,6 +69,7 @@ struct AppRootView: View {
             // Minor: hide the study ID and vitals in the app switcher.
             if scenePhase != .active { PrivacyCover() }
         }
+        .signInOverlay()
         .blurWhenCaptured(captureGuard)
         .sheet(isPresented: $showOutbox) { OutboxView() }
         .task { await session.start() }

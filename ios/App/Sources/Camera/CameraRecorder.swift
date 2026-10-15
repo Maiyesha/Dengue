@@ -212,6 +212,22 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
         }
     }
 
+    /// R-2: sign-in required while recording. Ends exactly this attempt now, keeping what was recorded: the
+    /// writer is finished (`finishActive`: `record` returns the partial `StepRecording`, sealing starts) and the
+    /// torch is turned off. With no frame written yet there is nothing to keep: the attempt is cancelled.
+    func finishEarly(_ rec: RecordingSession) {
+        videoQueue.async { [self] in
+            positioning = nil
+            guard let a = active, a.token == rec.token else { return }
+            if a.writer == nil || a.startPTS == nil {
+                failActive(RecorderError.cancelled)
+            } else {
+                finishActive(a)
+            }
+        }
+        sessionQueue.async { [self] in torchOff() }
+    }
+
     func stop() {
         videoQueue.async { [self] in positioning = nil; failActive(RecorderError.cancelled) }
         sessionQueue.async { [self] in

@@ -37,5 +37,6 @@ struct RepeatFlowView: View {
     var body: some View {
         FlowScreensView(c: c)
             .onChange(of: c.revision) { _, _ in if c.screen == .patientSelect { dismiss() } }
+            .signInOverlay()   // R-2: sign-in covers the repeat flow; it is never dismissed by auth state
     }
 }

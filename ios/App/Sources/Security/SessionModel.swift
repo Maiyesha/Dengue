@@ -62,8 +62,25 @@ final class SessionModel: ObservableObject {
         let hasTokens = ((try? o?.loadTokens()) ?? nil) != nil
         let g = SessionGate.evaluate(hasTokens: hasTokens, policy: policy)
         if case .signInRequired(true) = g { o?.signOut() }   // 12 h / unvalidated: delete the tokens
-        if g != gate { gate = g }
+        SignInOverlayModel.shared.update(required: Self.isSignIn(g), session: self)
+        guard g != gate else { return }
+        let wasSignIn = Self.isSignIn(gate)
+        gate = g
+        // R-2: sign-in is an overlay above the live flow; tell the flows (main and repeat) so they can stop a
+        // recording safely and later continue at the same step.
+        if Self.isSignIn(g), !wasSignIn {
+            NotificationCenter.default.post(name: .dsSignInRequired, object: nil)
+        } else if !Self.isSignIn(g), wasSignIn {
+            NotificationCenter.default.post(name: .dsSignInRestored, object: nil)
+        }
     }
+
+    private static func isSignIn(_ g: SessionGateState) -> Bool {
+        if case .signInRequired = g { return true }
+        return false
+    }
+
+    var requiresSignIn: Bool { Self.isSignIn(gate) }
 
     /// Any user interaction (root gesture): resets the 10 min idle timer while unlocked.
     func activity() { policy.recordActivity() }

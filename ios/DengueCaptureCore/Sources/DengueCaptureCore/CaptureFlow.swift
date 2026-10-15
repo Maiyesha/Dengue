@@ -139,6 +139,15 @@ public extension CaptureStep {
         }
     }
 }
+/// R-2: what to do with the recording that was live when sign-in became required.
+public enum AuthInterruption: Equatable {
+    case notRecording
+    /// At least the step minimum: finish it and evaluate it like a normal completed recording.
+    case finishAndEvaluate(step: CaptureStep, attempt: Int)
+    /// Shorter than the minimum: keep the partial clip (sealed, held, never uploaded); the attempt is not consumed.
+    case keepPartialClip(step: CaptureStep, attempt: Int)
+}
+
 /// Pure screen-order and gating logic for spec section 6. UI-framework free; the app wraps it in an
 /// ObservableObject. Inputs that are invalid for the current screen are ignored.
 public final class CaptureFlow {
@@ -173,6 +182,9 @@ public final class CaptureFlow {
 
     /// I2: recording a server-requested repeat of an existing session (consent is re-checked by the server).
     public private(set) var isRepeat = false
+
+    /// R-2: the nurse's session needs sign-in (the overlay is up). The flow stays alive; nothing new may start.
+    public private(set) var authPending = false
 
     private var consentMessage: String?
     private var assentGiven = false
@@ -236,7 +248,7 @@ public final class CaptureFlow {
     public var stateSignature: String {
         "\(screen)|\(String(describing: machine?.state))|\(thermalHold)|\(checklistSignature)|"
             + "\(issuesSignature)|\(pendingPrompt ?? "")|\(consentMessage ?? "")|"
-            + "\(positioningCues.map { "\($0)" } ?? "")|\(positioningReady)"
+            + "\(positioningCues.map { "\($0)" } ?? "")|\(positioningReady)|\(authPending)"
     }
 
     private var checklistSignature: String {
@@ -258,7 +270,7 @@ public final class CaptureFlow {
 
     public func stepReasons(_ step: CaptureStep) -> [ReasonCode] { machine?.lastReasons[step] ?? [] }
 
-    public var canCapture: Bool { screen == .capture && !thermalHold }
+    public var canCapture: Bool { screen == .capture && !thermalHold && !authPending }
 
     /// I5: non-blocking warning on the capture screen (battery below 15 %).
     public var preflightWarning: String? {
@@ -449,7 +461,7 @@ public final class CaptureFlow {
 
     /// Starts recording. For a face step only once `positioningReady` (I1); other steps start directly.
     public func positioned() {
-        guard screen == .capture, !thermalHold else { return }
+        guard screen == .capture, !thermalHold, !authPending else { return }
         if needsPositioningGate && !positioningReady { return }
         machine?.positioned()
         resetPositioning()
@@ -474,6 +486,40 @@ public final class CaptureFlow {
         machine?.interrupted()
         resetPositioning()   // re-position after any interruption
         syncScreen()
+    }
+
+    // MARK: R-2 sign-in required during capture
+
+    /// Sign-in (or re-auth) is now required. The flow is NOT torn down: it waits under the overlay, and no new
+    /// recording can start until `authRestored()`. A recording in progress is stopped by the app (recorder
+    /// stopped, writer finished, torch off), which then reports it with `recordingStoppedForAuth`.
+    public func authRequired() {
+        authPending = true
+        resetPositioning()
+    }
+
+    /// The recording that was live when sign-in became required has been stopped after `recordedSeconds`:
+    /// - at least the step minimum → `.finishAndEvaluate`: the caller reports it like any finished recording
+    ///   (`stepRecorded` then `verdict`); the attempt is consumed normally;
+    /// - shorter → `.keepPartialClip`: the attempt is NOT consumed (spec: an interruption does not use an attempt)
+    ///   and the flow is back at the same step; the caller seals the partial clip and keeps it as an
+    ///   `InterruptedClip` of the session's held record (never uploaded);
+    /// - nothing was recording → `.notRecording`.
+    public func recordingStoppedForAuth(recordedSeconds: Double) -> AuthInterruption {
+        guard screen == .capture, case .recording(let step, let attempt)? = machine?.state else { return .notRecording }
+        let minimum = captureProtocol.steps.first { $0.step == step }?.minimumSeconds ?? 0
+        if recordedSeconds.isFinite, recordedSeconds >= minimum {
+            return .finishAndEvaluate(step: step, attempt: attempt)
+        }
+        machine?.interrupted()
+        resetPositioning()
+        syncScreen()
+        return .keepPartialClip(step: step, attempt: attempt)
+    }
+
+    /// Sign-in succeeded: the nurse continues at the same step.
+    public func authRestored() {
+        authPending = false
     }
 
     public func thermalChanged(_ level: ThermalLevel) {
@@ -512,6 +558,7 @@ public final class CaptureFlow {
         consentMessage = nil; assentGiven = false; machine = nil
         resetPositioning()
         isRepeat = false
+        // authPending is nurse-session state, not patient state: deliberately kept.
     }
 
     private func syncScreen() {
