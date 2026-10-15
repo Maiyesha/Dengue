@@ -26,6 +26,12 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSCameraUsageDescription: "Records a short research video of the patient's face and fingertip."
+        UIBackgroundModes:
+          - remote-notification
+    entitlements:
+      path: Sources/DengueCapture.entitlements
+      properties:
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.reainmaker.denguecapture
