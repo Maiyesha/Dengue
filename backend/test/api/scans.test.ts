@@ -148,6 +148,16 @@ describe('POST /v1/scans', () => {
     expect(a.rows[0]).toEqual({ event_type: 'clinician_action', resource_type: 'scan', patient_pseudonym: 'ps-scan-1', outcome: 'scan:create' });
   });
 
+  it('ambient_temp_c / ambient_humidity_pct are optional (spec 9: if entered) → 201', async () => {
+    const { ambient_temp_c: _t, ambient_humidity_pct: _h, ...noAmbient } = metadata;
+    const r = await post('/v1/scans', scanBody({ captured_at: at(5000), metadata: noAmbient }));
+    expect(r.statusCode).toBe(201);
+    const row = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [r.json().scan.id])).rows[0];
+    expect(row.metadata.ambient_temp_c).toBeUndefined();
+    const bad = await post('/v1/scans', scanBody({ captured_at: at(6000), metadata: { ...metadata, ambient_humidity_pct: 120 } }));
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('same client_session_id returns 200 same id', async () => {
     const b = scanBody({ patient_id: P_OK2, captured_at: at(0) });
     const first = await post('/v1/scans', b);

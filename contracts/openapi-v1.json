@@ -1814,8 +1814,6 @@
                       "distance_cm",
                       "angle_deg",
                       "lighting_lux",
-                      "ambient_temp_c",
-                      "ambient_humidity_pct",
                       "mount",
                       "lighting_type",
                       "exposure_duration_ms"
