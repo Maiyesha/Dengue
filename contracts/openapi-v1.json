@@ -1811,9 +1811,6 @@
                       "frame_rate",
                       "resolution",
                       "exposure",
-                      "distance_cm",
-                      "angle_deg",
-                      "lighting_lux",
                       "mount",
                       "lighting_type",
                       "exposure_duration_ms"

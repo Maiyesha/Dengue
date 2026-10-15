@@ -195,6 +195,22 @@ describe('POST /v1/scans', () => {
     expect(row2.metadata.metadata_in_spec).toBe(false);
   });
 
+  it('I4: distance_cm / angle_deg / lighting_lux are optional (no face detected); metadata_in_spec is then false', async () => {
+    const { distance_cm: _d, angle_deg: _a, lighting_lux: _l, ...noFace } = metadata;
+    const r = await post('/v1/scans', scanBody({ captured_at: at(12000), metadata: noFace }));
+    expect(r.statusCode).toBe(201);
+    const row = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [r.json().scan.id])).rows[0];
+    expect(row.metadata.distance_cm).toBeUndefined();
+    expect(row.metadata.metadata_in_spec).toBe(false);
+    for (const [i, k] of (['distance_cm', 'angle_deg', 'lighting_lux'] as const).entries()) {
+      const { [k]: _omit, ...one } = metadata;
+      const r1 = await post('/v1/scans', scanBody({ captured_at: at(13000 + i * 100), metadata: one }));
+      expect(r1.statusCode).toBe(201);
+      const m = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [r1.json().scan.id])).rows[0].metadata;
+      expect(m.metadata_in_spec, k).toBe(false);
+    }
+  });
+
   it('same client_session_id returns 200 same id', async () => {
     const b = scanBody({ patient_id: P_OK2, captured_at: at(0) });
     const first = await post('/v1/scans', b);

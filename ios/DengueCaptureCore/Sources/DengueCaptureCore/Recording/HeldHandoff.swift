@@ -345,7 +345,9 @@ public final class CaptureHandoffService {
             }
             plan = try handoff.makeSessionPlan(
                 sessionId: p.sessionId, patientId: patientId, capturedAt: p.capturedAt, offline: p.offline,
-                protocolVersion: p.protocolVersion, metadata: try CaptureHandoff.scanMetadata(from: meta),
+                protocolVersion: p.protocolVersion,
+                metadata: try CaptureHandoff.scanMetadata(
+                    from: meta, faceAccepted: p.attempts.contains { $0.step == .neutralFace && $0.verdict == .accept }),
                 attempts: p.attempts, vitals: p.vitals, artefacts: p.artefacts)
         } catch let e as CaptureHandoffError {
             return hold(p, e, original)

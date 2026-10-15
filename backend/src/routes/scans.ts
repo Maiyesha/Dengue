@@ -37,8 +37,12 @@ const CaptureStep = z.enum(['neutral_face', 'fingertip_ppg', 'ocular_capture', '
 type CaptureStepT = z.infer<typeof CaptureStep>;
 const ReasonCode = z.string().min(1).max(64);
 
-/** True iff the capture met the positioning guidance (distance 20-80 cm, |angle| <= 15 deg, lux >= 200). */
-export const metadataInSpec = (m: { distance_cm: number; angle_deg: number; lighting_lux: number }): boolean =>
+/**
+ * True iff the capture met the positioning guidance (distance 20-80 cm, |angle| <= 15 deg, lux >= 200).
+ * False when any of the three is absent (I4: no face was ever detected, so nothing was measured).
+ */
+export const metadataInSpec = (m: { distance_cm?: number; angle_deg?: number; lighting_lux?: number }): boolean =>
+  m.distance_cm !== undefined && m.angle_deg !== undefined && m.lighting_lux !== undefined &&
   m.distance_cm >= 20 && m.distance_cm <= 80 && Math.abs(m.angle_deg) <= 15 && m.lighting_lux >= 200;
 
 /** doc 03 ContextualMetadata + capture-rig fields. */
@@ -49,9 +53,10 @@ const CaptureMetadata = z
     resolution: z.string().regex(/^[0-9]+x[0-9]+$/),
     exposure: z.number(),
     // Physical sanity only (T13 ruling): out-of-guidance values are research metadata, flagged via metadata_in_spec.
-    distance_cm: z.number().min(5).max(300),
-    angle_deg: z.number().min(-90).max(90),
-    lighting_lux: z.number().min(0),
+    // Optional (I4): absent when no face was ever detected during positioning; metadata_in_spec is then false.
+    distance_cm: z.number().min(5).max(300).optional(),
+    angle_deg: z.number().min(-90).max(90).optional(),
+    lighting_lux: z.number().min(0).optional(),
     ambient_temp_c: z.number().optional(),
     ambient_humidity_pct: z.number().min(0).max(100).optional(),
     mount: z.enum(['handheld', 'holder']),

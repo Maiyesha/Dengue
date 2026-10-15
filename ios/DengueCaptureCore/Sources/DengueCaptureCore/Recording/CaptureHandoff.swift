@@ -131,24 +131,25 @@ public struct CaptureHandoff {
     public static let sanityAngleDeg: ClosedRange<Double> = -90...90
     public static let sanityMinLux = 0.0
 
-    public static func scanMetadata(from m: CaptureMetadata) throws -> ScanMetadata {
+    /// `faceAccepted`: the session has an accepted face attempt. Only when it has none (e.g. no face was ever
+    /// detected) may distance / angle / lux be absent (I4); they are then omitted and the server records
+    /// `metadata_in_spec = false`. Any value that IS present is still sanity-checked.
+    public static func scanMetadata(from m: CaptureMetadata, faceAccepted: Bool = true) throws -> ScanMetadata {
         var missing: [String] = []
         if m.distanceCm == nil { missing.append("distance_cm") }
         if m.angleDeg == nil { missing.append("angle_deg") }
         if m.lux == nil { missing.append("lighting_lux") }
-        guard missing.isEmpty, let d = m.distanceCm, let a = m.angleDeg, let l = m.lux else {
-            throw CaptureHandoffError.metadataIncomplete(missing)
-        }
+        if faceAccepted, !missing.isEmpty { throw CaptureHandoffError.metadataIncomplete(missing) }
         // Server sanity ranges (backend CaptureMetadata): outside them createScan would 400 permanently.
         var outOfRange: [String] = []
-        if !(d.isFinite && sanityDistanceCm.contains(d)) { outOfRange.append("distance_cm") }
-        if !(a.isFinite && sanityAngleDeg.contains(a)) { outOfRange.append("angle_deg") }
-        if !(l.isFinite && l >= sanityMinLux) { outOfRange.append("lighting_lux") }
+        if let d = m.distanceCm, !(d.isFinite && sanityDistanceCm.contains(d)) { outOfRange.append("distance_cm") }
+        if let a = m.angleDeg, !(a.isFinite && sanityAngleDeg.contains(a)) { outOfRange.append("angle_deg") }
+        if let l = m.lux, !(l.isFinite && l >= sanityMinLux) { outOfRange.append("lighting_lux") }
         guard outOfRange.isEmpty else { throw CaptureHandoffError.metadataOutOfRange(outOfRange) }
         return ScanMetadata(cameraModel: m.deviceModel, frameRate: m.fps, resolution: m.resolution,
-                            exposure: m.exposureDurationMs / 1000, distanceCm: d, angleDeg: a, lightingLux: l,
-                            ambientTempC: m.ambientTempC, ambientHumidityPct: m.ambientHumidityPct, mount: m.mount,
-                            lightingType: m.lightingType, exposureDurationMs: m.exposureDurationMs)
+                            exposure: m.exposureDurationMs / 1000, distanceCm: m.distanceCm, angleDeg: m.angleDeg,
+                            lightingLux: m.lux, ambientTempC: m.ambientTempC, ambientHumidityPct: m.ambientHumidityPct,
+                            mount: m.mount, lightingType: m.lightingType, exposureDurationMs: m.exposureDurationMs)
     }
 
     /// Seals `input` to `output` and deletes the plaintext on success. On failure the plaintext is left for the

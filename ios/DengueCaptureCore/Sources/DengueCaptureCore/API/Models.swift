@@ -112,17 +112,18 @@ public struct ScanMetadata: Codable, Equatable {
     public var frameRate: Double
     public var resolution: String
     public var exposure: Double
-    public var distanceCm: Double
-    public var angleDeg: Double
-    public var lightingLux: Double
+    /// Optional (I4): absent only when no face attempt was accepted and nothing was measured.
+    public var distanceCm: Double?
+    public var angleDeg: Double?
+    public var lightingLux: Double?
     /// Optional: only when entered (spec section 9; T13 contract ruling).
     public var ambientTempC: Double?
     public var ambientHumidityPct: Double?
     public var mount: String
     public var lightingType: String
     public var exposureDurationMs: Double
-    public init(cameraModel: String, frameRate: Double, resolution: String, exposure: Double, distanceCm: Double,
-                angleDeg: Double, lightingLux: Double, ambientTempC: Double?, ambientHumidityPct: Double?,
+    public init(cameraModel: String, frameRate: Double, resolution: String, exposure: Double, distanceCm: Double?,
+                angleDeg: Double?, lightingLux: Double?, ambientTempC: Double?, ambientHumidityPct: Double?,
                 mount: String, lightingType: String, exposureDurationMs: Double) {
         self.cameraModel = cameraModel; self.frameRate = frameRate; self.resolution = resolution
         self.exposure = exposure; self.distanceCm = distanceCm; self.angleDeg = angleDeg
