@@ -362,3 +362,23 @@ final class RecordingFixTests: XCTestCase {
         XCTAssertTrue(orphans.allSatisfy(alive))
     }
 }
+
+final class SensorGeometryTests: XCTestCase {
+    func testUnrotateMapsPortraitPointBackToSensor() {
+        // 90 degrees clockwise: sensor (x, y) -> rotated (1 - y, x); inverse x = v, y = 1 - u.
+        let p = SensorGeometry.sensorPoint(rotatedU: 0.25, rotatedV: 0.75, rotationDegrees: 90)
+        XCTAssertEqual(p.x, 0.75, accuracy: 1e-12); XCTAssertEqual(p.y, 0.75, accuracy: 1e-12)
+        let q = SensorGeometry.sensorPoint(rotatedU: 0.1, rotatedV: 0.2, rotationDegrees: 0)
+        XCTAssertEqual(q.x, 0.1, accuracy: 1e-12); XCTAssertEqual(q.y, 0.2, accuracy: 1e-12)
+        let r = SensorGeometry.sensorPoint(rotatedU: 0.1, rotatedV: 0.2, rotationDegrees: 180)
+        XCTAssertEqual(r.x, 0.9, accuracy: 1e-12); XCTAssertEqual(r.y, 0.8, accuracy: 1e-12)
+        let s = SensorGeometry.sensorPoint(rotatedU: 0.1, rotatedV: 0.2, rotationDegrees: 270)
+        XCTAssertEqual(s.x, 0.8, accuracy: 1e-12); XCTAssertEqual(s.y, 0.1, accuracy: 1e-12)
+    }
+
+    func testDepthMedianCmIgnoresHolesAndNonFinite() {
+        XCTAssertEqual(SensorGeometry.medianDepthCm(meters: [0.40, .nan, 0, 0.44, 0.42, -1, .infinity]) ?? 0, 42,
+                       accuracy: 1e-4)
+        XCTAssertNil(SensorGeometry.medianDepthCm(meters: [0, .nan]))
+    }
+}
