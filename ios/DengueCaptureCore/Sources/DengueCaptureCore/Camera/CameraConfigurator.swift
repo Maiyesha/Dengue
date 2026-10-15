@@ -12,7 +12,10 @@ public struct CameraConfigurator {
     /// Must run on the capture session queue (not main), with the session running and
     /// `sessionPreset = .inputPriority`: AVFoundation completion handlers fire only once
     /// frames flow. Throws `CameraError.notReady(setting:)` on any read-back mismatch.
-    public func configure(_ d: CaptureDeviceControl, role: CameraRole, preferExposureMs: Double) throws -> AppliedCameraSettings {
+    /// `targetISO`: from `ExposurePlanner` after auto exposure converged during positioning (I1); nil uses the
+    /// role's default. Always clamped into the device range.
+    public func configure(_ d: CaptureDeviceControl, role: CameraRole, preferExposureMs: Double,
+                          targetISO: Float? = nil) throws -> AppliedCameraSettings {
         guard preferExposureMs == 10 || preferExposureMs == 20 else { throw CameraError.invalidExposure }
 
         // Frame rate: min == max == 1/30 s.
@@ -24,7 +27,8 @@ public struct CameraConfigurator {
         }
 
         // Custom exposure; ISO clamped into the device range.
-        let targetISO = min(max(Self.preferredISO(for: role), d.isoRange.lowerBound), d.isoRange.upperBound)
+        let wanted = targetISO.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? Self.preferredISO(for: role)
+        let targetISO = min(max(wanted, d.isoRange.lowerBound), d.isoRange.upperBound)
         try d.setCustomExposure(durationSeconds: preferExposureMs / 1000, iso: targetISO)
         guard abs(d.exposureDurationSeconds * 1000 - preferExposureMs) < 0.1,
               abs(d.iso - targetISO) < 1 else {

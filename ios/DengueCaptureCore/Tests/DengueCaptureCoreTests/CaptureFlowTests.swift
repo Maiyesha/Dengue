@@ -33,7 +33,7 @@ final class CaptureFlowTests: XCTestCase {
     }
 
     func runStep(_ f: CaptureFlow, duration: Double = 40) {
-        f.positioned(); f.stepRecorded(duration: duration); f.verdict(.accept)
+        f.positionedForTest(); f.stepRecorded(duration: duration); f.verdict(.accept)
     }
 
     func testHappyPathReachesSaved() {
@@ -71,7 +71,7 @@ final class CaptureFlowTests: XCTestCase {
         XCTAssertEqual(f.screen, .consent)
         XCTAssertEqual(f.blockingMessage, NurseCopy.consentBlocked)
         XCTAssertFalse(f.canCapture)
-        f.giveAssent(); f.proceedFromChecklist(); f.submitVitals([.hr: VitalEntry(text: "80")], now: now); f.positioned()
+        f.giveAssent(); f.proceedFromChecklist(); f.submitVitals([.hr: VitalEntry(text: "80")], now: now); f.positionedForTest()
         XCTAssertEqual(f.screen, .consent)
         XCTAssertNil(f.currentStep)
     }
@@ -130,16 +130,16 @@ final class CaptureFlowTests: XCTestCase {
 
     func testThermalSeriousDuringRecordingInterruptsAndShowsPhoneWarm() {
         let f = flowAtCapture()
-        f.positioned()
+        f.positionedForTest()
         XCTAssertEqual(f.machineState, .recording(.neutralFace, attempt: 1))
         f.thermalChanged(.serious)
         XCTAssertEqual(f.machineState, .positioning(.neutralFace))
         XCTAssertEqual(f.blockingMessage, NurseCopy.phoneWarm)
-        f.positioned()
+        f.positionedForTest()
         XCTAssertEqual(f.machineState, .positioning(.neutralFace), "cannot start while warm")
         f.thermalChanged(.nominal)
         XCTAssertNil(f.blockingMessage)
-        f.positioned()
+        f.positionedForTest()
         XCTAssertEqual(f.machineState, .recording(.neutralFace, attempt: 1), "attempt not consumed")
     }
 
@@ -191,7 +191,7 @@ final class CaptureFlowTests: XCTestCase {
         let f = flowAtCapture()
         for _ in 0..<2 {
             for _ in 0..<3 {
-                f.positioned(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002]))
+                f.positionedForTest(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002]))
             }
         }
         XCTAssertEqual(f.screen, .qualityResult)
@@ -204,7 +204,7 @@ final class CaptureFlowTests: XCTestCase {
     func testPartialUsesAcquisitionFailureCopy() {
         let f = flowAtCapture()
         runStep(f)
-        for _ in 0..<3 { f.positioned(); f.stepRecorded(duration: 30); f.verdict(.recapture([.dsQG005])) }
+        for _ in 0..<3 { f.positionedForTest(); f.stepRecorded(duration: 30); f.verdict(.recapture([.dsQG005])) }
         XCTAssertEqual(f.screen, .qualityResult)
         f.continueFromQuality()
         XCTAssertEqual(f.savedMessage, NurseCopy.acquisitionFailure)
@@ -212,7 +212,7 @@ final class CaptureFlowTests: XCTestCase {
 
     func testStepEventsIgnoredOutsideCapture() {
         let f = flowAtVitals()
-        f.positioned(); f.verdict(.accept)
+        f.positionedForTest(); f.verdict(.accept)
         XCTAssertEqual(f.screen, .referenceVitals)
         XCTAssertNil(f.machineState)
     }

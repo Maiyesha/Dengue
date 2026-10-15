@@ -162,6 +162,15 @@ public final class CaptureFlow {
     public static let monitorPromptSeconds: Double = 20
     public static let maxSnapshotFutureSkew: TimeInterval = 300
 
+    // I1 positioning sub-state (face step): recording may start only after Guidance returned exactly
+    // `[.ready]` continuously for `positioningHoldSeconds`.
+    public static let positioningHoldSeconds: Double = 2
+    /// Latest guidance cues while positioning a face step (nil otherwise); the UI shows them.
+    public private(set) var positioningCues: [GuidanceCue]?
+    /// Monotonic time (seconds) of the latest guidance update, if any.
+    public private(set) var lastGuidanceTime: Double?
+    private var readySince: Double?
+
     private var consentMessage: String?
     private var assentGiven = false
     private var showedSaved = false
@@ -223,7 +232,8 @@ public final class CaptureFlow {
     /// Changes whenever anything a view can show changes (lets the coordinator skip no-op refreshes).
     public var stateSignature: String {
         "\(screen)|\(String(describing: machine?.state))|\(thermalHold)|\(checklistSignature)|"
-            + "\(issuesSignature)|\(pendingPrompt ?? "")|\(consentMessage ?? "")"
+            + "\(issuesSignature)|\(pendingPrompt ?? "")|\(consentMessage ?? "")|"
+            + "\(positioningCues.map { "\($0)" } ?? "")|\(positioningReady)"
     }
 
     private var checklistSignature: String {
@@ -246,6 +256,48 @@ public final class CaptureFlow {
     public func stepReasons(_ step: CaptureStep) -> [ReasonCode] { machine?.lastReasons[step] ?? [] }
 
     public var canCapture: Bool { screen == .capture && !thermalHold }
+
+    /// I5: non-blocking warning on the capture screen (battery below 15 %).
+    public var preflightWarning: String? {
+        guard screen == .capture, preflight.warning == .lowBattery else { return nil }
+        return NurseCopy.lowBatteryWarning
+    }
+
+    /// The current step needs the face positioning gate (Vision guidance).
+    public var needsPositioningGate: Bool {
+        if case .positioning(.neutralFace)? = machine?.state, screen == .capture { return true }
+        return false
+    }
+
+    /// Exactly `[.ready]` continuously for at least `positioningHoldSeconds`, up to the latest update.
+    public var positioningReady: Bool {
+        guard needsPositioningGate, let since = readySince, let last = lastGuidanceTime else { return false }
+        return last - since >= Self.positioningHoldSeconds
+    }
+
+    /// Feed every guidance evaluation while positioning (`t`: monotonic seconds). Ignored outside a face
+    /// step's positioning. Any other cue set, a non-finite time or time going backwards restarts the hold.
+    public func guidanceUpdate(_ cues: [GuidanceCue], at t: Double) {
+        guard needsPositioningGate else { return }
+        positioningCues = cues
+        guard t.isFinite, lastGuidanceTime.map({ t >= $0 }) ?? true else {
+            readySince = nil
+            lastGuidanceTime = t.isFinite ? t : nil
+            return
+        }
+        lastGuidanceTime = t
+        if cues == [.ready] {
+            if readySince == nil { readySince = t }
+        } else {
+            readySince = nil
+        }
+    }
+
+    private func resetPositioning() {
+        positioningCues = nil
+        lastGuidanceTime = nil
+        readySince = nil
+    }
 
     public var checklistComplete: Bool { checklist.count == FlowChecklistItem.allCases.count }
 
@@ -382,9 +434,12 @@ public final class CaptureFlow {
 
     // MARK: Step events (delegated to CaptureSessionMachine)
 
+    /// Starts recording. For a face step only once `positioningReady` (I1); other steps start directly.
     public func positioned() {
         guard screen == .capture, !thermalHold else { return }
+        if needsPositioningGate && !positioningReady { return }
         machine?.positioned()
+        resetPositioning()
         syncScreen()
     }
 
@@ -404,6 +459,7 @@ public final class CaptureFlow {
     public func pause() {
         guard screen == .capture else { return }
         machine?.interrupted()
+        resetPositioning()   // re-position after any interruption
         syncScreen()
     }
 
@@ -441,10 +497,12 @@ public final class CaptureFlow {
         pendingPrompt = nil; monitorPromptFired = false; flaggedText = [:]
         // thermalHold is device state, not patient state: deliberately kept.
         consentMessage = nil; assentGiven = false; machine = nil
+        resetPositioning()
     }
 
     private func syncScreen() {
         guard let state = machine?.state else { return }
+        if case .positioning = state {} else { resetPositioning() }
         switch state {
         case .blocked: screen = .blocked
         case .completed: screen = .qualityResult

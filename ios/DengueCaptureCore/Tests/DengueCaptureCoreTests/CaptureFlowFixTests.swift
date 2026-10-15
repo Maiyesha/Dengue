@@ -28,7 +28,7 @@ final class CaptureFlowFixTests: XCTestCase {
     }
 
     func runStep(_ f: CaptureFlow, duration: Double = 40) {
-        f.positioned(); f.stepRecorded(duration: duration); f.verdict(.accept)
+        f.positionedForTest(); f.stepRecorded(duration: duration); f.verdict(.accept)
     }
 
     func testResetKeepsThermalHold() {
@@ -42,10 +42,10 @@ final class CaptureFlowFixTests: XCTestCase {
 
     func testPauseDuringRecordingConsumesNoAttempt() {
         let f = flowAtCapture()
-        f.positioned()
+        f.positionedForTest()
         f.pause()
         XCTAssertEqual(f.machineState, .positioning(.neutralFace))
-        f.positioned()
+        f.positionedForTest()
         XCTAssertEqual(f.machineState, .recording(.neutralFace, attempt: 1))
     }
 
@@ -126,7 +126,7 @@ final class CaptureFlowFixTests: XCTestCase {
         let f = flowAtCapture()
         f.recordingElapsed(20)
         XCTAssertNil(f.pendingPrompt, "not recording yet")
-        f.positioned()
+        f.positionedForTest()
         f.recordingElapsed(19.9)
         XCTAssertNil(f.pendingPrompt)
         f.recordingElapsed(20)
@@ -139,12 +139,12 @@ final class CaptureFlowFixTests: XCTestCase {
     func testMonitorHRPromptNotOnFingertipOrWhenVitalsSkipped() {
         let f = flowAtCapture()
         runStep(f)
-        f.positioned()
+        f.positionedForTest()
         f.recordingElapsed(25)
         XCTAssertNil(f.pendingPrompt)
         let g = flowAtVitals()
         g.skipVitals(reason: .monitorUnavailable)
-        g.positioned(); g.recordingElapsed(25)
+        g.positionedForTest(); g.recordingElapsed(25)
         XCTAssertNil(g.pendingPrompt)
     }
 
@@ -160,7 +160,7 @@ final class CaptureFlowFixTests: XCTestCase {
     func testRecordStepAgainAndRetryInstruction() {
         let f = flowAtCapture()
         XCTAssertNil(f.retryInstruction)
-        f.positioned(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002]))
+        f.positionedForTest(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002]))
         XCTAssertEqual(f.statusMessage, NurseCopy.recordStepAgain(1))
         XCTAssertEqual(f.retryInstruction, ReasonCode.dsQG002.nurseInstruction)
         XCTAssertEqual(f.stepStatus(.neutralFace), .recordAgain)
@@ -168,7 +168,7 @@ final class CaptureFlowFixTests: XCTestCase {
 
     func testUnableToAcquireShowsCouldNotRecordNotRecordAgain() {
         let f = flowAtCapture()
-        for _ in 0..<3 { f.positioned(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002])) }
+        for _ in 0..<3 { f.positionedForTest(); f.stepRecorded(duration: 40); f.verdict(.recapture([.dsQG002])) }
         XCTAssertEqual(f.stepStatus(.neutralFace), .couldNotRecord, "advanced past, so failed")
         runStep(f, duration: 30)
         XCTAssertEqual(f.screen, .qualityResult)
@@ -191,7 +191,7 @@ final class CaptureFlowFixTests: XCTestCase {
         let a = f.stateSignature
         f.pause()
         XCTAssertEqual(f.stateSignature, a, "no-op pause leaves the signature unchanged")
-        f.positioned()
+        f.positionedForTest()
         XCTAssertNotEqual(f.stateSignature, a)
     }
 

@@ -61,6 +61,7 @@ public enum NurseCopy {
     public static let cameraDenied = "The camera is needed to record. Open Settings to allow camera access."
     public static let lowStorage = "Storage is low. Let uploads finish to free space before recording."
     public static let lowBattery = "Battery is too low to record. Please charge the phone."
+    public static let lowBatteryWarning = "Battery is low. Charge the phone after this patient."
     public static let interrupted = "Recording was interrupted. This step will be repeated."
     public static let offlineQueued = "Will upload when connected"
     public static let recentScan = "This patient was recorded in the last 30 min"
@@ -189,7 +190,7 @@ public enum NurseCopy {
             holdStillPatient, fingertipGuidance, cameraNotReady, showColourCard, comeBackLater,
             patientDeclined, disinfectReminder, phoneWarm,
             statusGood, recordAgainLead, recordAgainTail, statusCouldNotRecord, stepPassed, stepRecordAgain,
-            cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
+            cameraDenied, lowStorage, lowBattery, lowBatteryWarning, interrupted, offlineQueued,
             recentScan, repeatNoticeLead, repeatNoticeTail, repeatNotificationLead,
             uploadRejected, unsentWarning, statusQueued, statusUploading, statusSent, statusClosed, buttonRecordAgain,
             monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,

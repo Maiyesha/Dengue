@@ -35,12 +35,17 @@ public enum SessionState: Equatable {
     case blocked(BlockReason)
 }
 
+public enum PreflightWarning: Equatable { case lowBattery }
+
 public struct Preflight: Equatable {
     public static let minimumFreeBytes: Int64 = 2_000_000_000
     public static let minimumBattery: Double = 0.05
+    /// I5: below this the capture screen warns (capture still allowed).
+    public static let warnBattery: Double = 0.15
 
     public var freeBytes: Int64
     public var batteryLevel: Double
+    /// `UIDevice.batteryLevel` (0...1); negative = unknown (monitoring off, simulator): never low.
     /// The front camera offers a depth-capable TrueDepth format (needed for distance_cm).
     public var supportsDepthCapture: Bool
 
@@ -52,12 +57,17 @@ public struct Preflight: Equatable {
 
     public var blockReason: BlockReason? {
         if freeBytes < Preflight.minimumFreeBytes { return .lowStorage }
-        if batteryLevel < Preflight.minimumBattery { return .lowBattery }
+        if batteryLevel >= 0, batteryLevel < Preflight.minimumBattery { return .lowBattery }
         if !supportsDepthCapture { return .unsupportedDevice }
         return nil
     }
 
     public var canStartCapture: Bool { blockReason == nil }
+
+    public var warning: PreflightWarning? {
+        if batteryLevel >= 0, batteryLevel < Preflight.warnBattery { return .lowBattery }
+        return nil
+    }
 }
 
 public final class CaptureSessionMachine {
