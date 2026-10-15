@@ -6,6 +6,6 @@ struct DengueCaptureApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup { FlowRootView() }
+        WindowGroup { AppRootView() }   // C2: sign-in gate, idle lock, capture blur
     }
 }

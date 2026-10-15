@@ -10,7 +10,11 @@ import DengueCaptureCore
 final class LocalRepeatNotifier: RepeatNotifier {
     func postRepeatNotice(_ text: String) {
         DispatchQueue.main.async {
-            guard UIApplication.shared.applicationState != .active else { return }
+            guard UIApplication.shared.applicationState != .active else {
+                // I2: foreground -> in-app banner (RepeatBanner at the app root) instead of a notification.
+                NotificationCenter.default.post(name: .dsRepeatRequested, object: nil, userInfo: ["text": text])
+                return
+            }
             let content = UNMutableNotificationContent()
             content.body = text
             content.sound = .default
@@ -123,6 +127,8 @@ final class UploadCoordinator: @unchecked Sendable {
     let uploader: BackgroundPartUploader
     let engine: UploadEngine
     let outbox: Outbox
+    /// C2: DengueAPI-backed consent with the offline roster cache.
+    let consent: ConsentService
     private let api: URLSessionDengueAPI
     private let enrolment: DeviceEnrolment
     private let credentials: DeviceCredentialStore
@@ -134,6 +140,7 @@ final class UploadCoordinator: @unchecked Sendable {
     private var launched = false
     private var pendingPushToken: String?
     private var wakeTask: Task<Void, Never>?
+    private var renewTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) throws {
         let fm = FileManager.default
@@ -150,23 +157,25 @@ final class UploadCoordinator: @unchecked Sendable {
             throw CocoaError(.featureUnsupported)   // not provisioned by MDM yet
         }
         let clock = SystemClock()
-        #if canImport(GRDB)
-        outbox = try Outbox(dbPath: base.appendingPathComponent("outbox.sqlite").path, clock: clock)
-        #else
-        outbox = Outbox(store: try FileOutboxStore(directory: base.appendingPathComponent("outbox")), clock: clock)
-        #endif
+        outbox = try Outbox.makeDefault(directory: base, clock: clock)   // store choice lives in core (fix 5)
         uploader = try BackgroundPartUploader(baseDirectory: base)   // creates the background session
         let sessions = try FileUploadSessionStore(directory: base.appendingPathComponent("upload-sessions"))
 
         let creds = DeviceCredentialStore()
         credentials = creds
-        api = URLSessionDengueAPI(baseURL: baseURL, session: .shared,
+        // I7: dedicated TLS 1.3 session (pinned via NSPinnedDomains), never `.shared`.
+        api = URLSessionDengueAPI(baseURL: baseURL, session: NetworkSecurity.apiSession(),
                                   tokenProvider: { kind in UploadCoordinator.bearer(for: kind, credentials: creds) })
+        consent = ConsentService(api: api, cache: ConsentCache(storage: FileConsentCacheStorage(
+            url: base.appendingPathComponent("consent-roster.json"))), wardId: managed["ward_id"] as? String)
         enrolment = DeviceEnrolment(api: api, attest: AppAttestService(), clock: clock)
         engine = UploadEngine(outbox: outbox, api: api, sessions: sessions, keys: SecureEnclaveKeyStore(),
                               uploader: uploader, notifier: LocalRepeatNotifier())
 
         engine.onDeviceAuthFailure = { [weak self] e in self?.deviceTokenRefused(e) }
+        engine.onUserAuthFailure = {
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .dsUserAuthFailed, object: nil) }
+        }
         uploader.onPartFinished = { [weak self] in
             // Background relaunch: nobody is waiting on the part; drain to consume it and start the next part.
             guard let self else { return }
@@ -197,6 +206,29 @@ final class UploadCoordinator: @unchecked Sendable {
     func foreground() async {
         await launch()
         await engine.refreshVerdicts()
+        engine.expireRepeatWindows()
+        await consent.refreshRoster()
+    }
+
+    /// C2: after a successful sign-in: enrol the device (first sign-in) or renew, drain, refresh the roster.
+    func signedIn() {
+        Task {
+            await withBackgroundTime { sc in await self.drain(shouldContinue: sc) }
+            await self.consent.refreshRoster()
+        }
+    }
+
+    /// C2: renew the device token before it expires (renewal window starts 4 h before expiry), also while
+    /// the app stays in the foreground. Rescheduled after every token change.
+    private func scheduleRenewal(_ state: DeviceTokenState) {
+        lock.lock(); defer { lock.unlock() }
+        renewTask?.cancel()
+        let delay = max(60, state.renewAt.timeIntervalSinceNow)
+        renewTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await self.withBackgroundTime { sc in await self.drain(shouldContinue: sc) }
+        }
     }
 
     /// Renew/enrol if needed, drain, then schedule the next wake-up for pending retries.
@@ -319,6 +351,7 @@ final class UploadCoordinator: @unchecked Sendable {
                 renewed = true
             }
             lock.lock(); tokenState = state; lock.unlock()
+            if !state.reEnrolRequired { scheduleRenewal(state) }
             guard state.reEnrolRequired else { return renewed }
             credentials.clearCredential()   // revoked / DS_DEVICE_001: fall through to a fresh enrolment
             lock.lock(); tokenState = nil; lock.unlock()
@@ -333,6 +366,7 @@ final class UploadCoordinator: @unchecked Sendable {
                                              issuedAt: c.state.issuedAt, expiresIn: c.state.expiresIn))
             credentials.clearProgress()
             lock.lock(); tokenState = c.state; lock.unlock()
+            scheduleRenewal(c.state)
             await sendPendingPushToken()
             return true
         } catch APIError.reEnrol {

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import DengueCaptureCore
 
 /// Consent lookup used by the consent screen. Real implementation wraps DengueAPI + the roster cache.
@@ -8,7 +9,40 @@ protocol ConsentSource {
         -> (status: ConsentStatus, snapshotAt: Date, online: Bool, patientId: UUID?)
 }
 
-/// Deterministic consent source for UI tests (UITEST_CONSENT = ok | blocked | stale).
+/// C2 production consent: core `ConsentService` (online lookup + consent status; 24 h roster cache offline).
+/// A refused nurse session (`signInRequired`) also asks the app root to show sign-in.
+struct APIConsentSource: ConsentSource {
+    let service: ConsentService
+    func consent(for participantCode: String) async
+        -> (status: ConsentStatus, snapshotAt: Date, online: Bool, patientId: UUID?) {
+        let r = await service.resolve(participantCode: participantCode)
+        if r.outcome == .signInRequired {
+            await MainActor.run { NotificationCenter.default.post(name: .dsUserAuthFailed, object: nil) }
+        }
+        return (r.status, r.snapshotAt, r.online, r.patientId)
+    }
+}
+
+/// Uploads (and therefore the API) not provisioned by MDM yet: capture is blocked (fail closed).
+struct UnconfiguredConsentSource: ConsentSource {
+    func consent(for participantCode: String) async
+        -> (status: ConsentStatus, snapshotAt: Date, online: Bool, patientId: UUID?) {
+        (ConsentStatus(primaryResearch: false, consentVersion: "", currentVersion: "", withdrawn: false,
+                       captureAllowed: false, blockCode: nil, checkedAt: WireDate.string(from: Date())),
+         Date(), true, nil)
+    }
+}
+
+/// A server-requested repeat (I2): only the masked code and the listed steps are known on the phone.
+struct RepeatRequest: Identifiable, Equatable {
+    let sessionId: UUID
+    let maskedCode: String
+    let steps: [CaptureStepName]
+    let reasons: [ReasonCode]
+    var id: UUID { sessionId }
+}
+
+/// Deterministic consent source for UI tests ONLY (UITEST_CONSENT = ok | blocked | stale).
 struct FakeConsentSource: ConsentSource {
     let mode: String
     func consent(for participantCode: String) async
@@ -31,6 +65,10 @@ final class FlowCoordinator: ObservableObject {
     private let experimentalEnabled: Bool
     /// Hand-off to uploads (off for UI tests: the fake camera seals nothing).
     private let handoffEnabled: Bool
+    /// I2: set when this coordinator records a server-requested repeat.
+    let repeatRequest: RepeatRequest?
+    /// Step whose positioning the camera is currently running (I1).
+    private var positioningStep: CaptureStep?
 
     // Per patient session (cleared by reset()).
     private var sessionId = UUID()
@@ -56,27 +94,41 @@ final class FlowCoordinator: ObservableObject {
     @Published var cameraMessage: String?
 
     init(flow: CaptureFlow, consentSource: ConsentSource, camera: CaptureCameraProviding,
-         experimentalEnabled: Bool = false, handoffEnabled: Bool = true) {
+         experimentalEnabled: Bool = false, handoffEnabled: Bool = true, repeatRequest: RepeatRequest? = nil) {
         self.flow = flow
         self.consentSource = consentSource
         self.camera = camera
         self.experimentalEnabled = experimentalEnabled
         self.handoffEnabled = handoffEnabled
+        self.repeatRequest = repeatRequest
+        if let r = repeatRequest {
+            sessionId = r.sessionId
+            flow.beginRepeat(maskedCode: r.maskedCode)
+        }
     }
+
+    static var isUITest: Bool { ProcessInfo.processInfo.environment["UITEST_FAKE_CAMERA"] == "1" }
 
     static func make() -> FlowCoordinator {
         let env = ProcessInfo.processInfo.environment
-        let preflight = Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8)
-        let flow = CaptureFlow(preflight: preflight)
-        if env["UITEST_FAKE_CAMERA"] == "1" {
+        let flow = CaptureFlow(preflight: DevicePreflight.current(supportsDepthCapture: true))
+        if isUITest {
             return FlowCoordinator(
                 flow: flow, consentSource: FakeConsentSource(mode: env["UITEST_CONSENT"] ?? "ok"),
                 camera: FakeCamera(), experimentalEnabled: env["UITEST_EXPERIMENTAL"] == "1", handoffEnabled: false)
         }
-        // Production: real AVFoundation recorder (Task 13). The consent source is still the blocking placeholder
-        // (DengueAPI consent/roster wiring was not part of Tasks 10-12).
-        return FlowCoordinator(
-            flow: flow, consentSource: FakeConsentSource(mode: "blocked"), camera: CameraRecorder())
+        // Production (C2): DengueAPI-backed consent; blocked until MDM provisions the API.
+        let consent: ConsentSource = UploadCoordinator.shared.map { APIConsentSource(service: $0.consent) }
+            ?? UnconfiguredConsentSource()
+        return FlowCoordinator(flow: flow, consentSource: consent, camera: CameraRecorder.shared)
+    }
+
+    /// I2: a repeat recording of `r.steps` for an existing session (ends in `UploadEngine.enqueueRecapture`).
+    static func makeRepeat(_ r: RepeatRequest) -> FlowCoordinator {
+        let flow = CaptureFlow(protocol: .repeatProtocol(steps: r.steps),
+                               preflight: DevicePreflight.current(supportsDepthCapture: true))
+        return FlowCoordinator(flow: flow, consentSource: UnconfiguredConsentSource(), camera: CameraRecorder.shared,
+                               repeatRequest: r)
     }
 
     /// Bumps `revision` only when something a view can show actually changed (no remount loops).
@@ -136,9 +188,45 @@ final class FlowCoordinator: ObservableObject {
 
     /// Capture-screen entry: devices without a depth-capable TrueDepth front format are blocked before capture
     /// (`BlockReason.unsupportedDevice`, copy "Camera not ready — try again").
+    /// I5: real free space (`volumeAvailableCapacityForImportantUsage`) and battery (`UIDevice.batteryLevel`).
     private func enteringCapture() {
         let depth = handoffEnabled ? CameraRecorder.supportsDepthCapture() : true   // UI tests: fake camera
-        flow.updatePreflight(Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8, supportsDepthCapture: depth))
+        flow.updatePreflight(Self.isUITest ? Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8)
+                                           : DevicePreflight.current(supportsDepthCapture: depth))
+    }
+
+    // MARK: positioning (I1)
+
+    /// Runs the camera's positioning (preview, auto exposure, guidance) for the step being positioned.
+    /// Called by the capture screen on appear and after every change.
+    func ensurePositioning() {
+        guard flow.screen == .capture, case .positioning(let step)? = flow.machineState, !flow.thermalHold else {
+            if currentRecording == nil { positioningStep = nil }
+            return
+        }
+        guard positioningStep != step else { return }
+        positioningStep = step
+        camera.startPositioning(step: step) { [weak self] cues, t in
+            Task { @MainActor [weak self] in
+                guard let self, self.positioningStep == step else { return }
+                self.flow.guidanceUpdate(cues, at: t)
+                self.refresh()
+            }
+        }
+    }
+
+    /// Start is possible only once the face has been positioned for 2 s (core gate); other steps directly.
+    var canStart: Bool { flow.canCapture && (!flow.needsPositioningGate || flow.positioningReady) }
+
+    /// Current guidance line for the face oval (NurseCopy).
+    var guidanceText: String? { flow.positioningCues?.first.map(NurseCopy.text(for:)) }
+
+    var previewSession: AVCaptureSession? { camera.previewSession }
+
+    /// I2: live upload status of the session just recorded (nil before the hand-off or in UI tests).
+    var sessionStatus: SessionStatus? {
+        guard handoffEnabled else { return nil }
+        return UploadCoordinator.shared?.engine.status(sessionId)
     }
 
     /// Pause button, lock, app switch: discards the partial recording; the attempt is not consumed.
@@ -175,10 +263,11 @@ final class FlowCoordinator: ObservableObject {
     /// Starts and records the current step under a fresh per-attempt token. The result is used only while that
     /// token is still the current recording (a paused attempt's late result is discarded).
     func startCurrentStep() {
-        guard let step = flow.currentStep,
+        guard let step = flow.currentStep, case .positioning? = flow.machineState,
               let cfg = flow.steps.first(where: { $0.step == step }) else { return }
         syncThermal()
-        flow.positioned()
+        flow.positioned()   // the core gate refuses a face step that has not been ready for 2 s
+        positioningStep = nil
         // UI-test hook: simulate thermal pressure once, while recording.
         if ProcessInfo.processInfo.environment["UITEST_THERMAL_SERIOUS"] == "1", !injectedThermal,
            case .recording? = flow.machineState {
@@ -268,6 +357,7 @@ final class FlowCoordinator: ObservableObject {
 
     /// Session over: wait for sealing, then `CaptureStorage.submit` (enqueued, or held; never shredded).
     private func handOff() {
+        if repeatRequest != nil { handOffRepeat(); return }
         guard handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
         handedOff = true
         camera.stop()
@@ -277,6 +367,43 @@ final class FlowCoordinator: ObservableObject {
             var p = base
             for t in tasks { p.artefacts += await t.value }
             storage.submit(p)
+        }
+    }
+
+    /// I2: the repeat's accepted steps become a recapture of the existing session: `enqueueRecapture` with the
+    /// server's next attempt number per step. Device-rejected local attempts are not server attempts and are
+    /// destroyed. If the repeat cannot be queued (window passed, no KMS key) its artefacts are destroyed: the
+    /// session itself is already on the server.
+    private func handOffRepeat() {
+        guard let r = repeatRequest, handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
+        handedOff = true
+        camera.stop()
+        let tasks = acceptedSealing
+        let accepted = flow.attemptLog.filter { $0.verdict == .accept }.map { $0.step }
+        Task.detached {
+            var sealed: [SealedStepArtefact] = []
+            for t in tasks { sealed += await t.value }
+            guard let engine = UploadCoordinator.shared?.engine else { storage.destroy(sealed); return }
+            sealed = storage.wrapMissingKeys(sealed)
+            var uploads: [ArtefactUpload] = []
+            var steps: [CaptureStepName] = []
+            for a in sealed {
+                guard let name = CaptureStepName(rawValue: a.step.rawValue), accepted.contains(a.step),
+                      let attempt = engine.recaptureAttempt(sessionId: r.sessionId, step: name) else { continue }
+                if !steps.contains(name) { steps.append(name) }
+                uploads.append(ArtefactUpload(step: name, attempt: attempt, kind: a.kind, deviceVerdict: .accept,
+                                              sealed: a.sealed))
+            }
+            let used = Set(uploads.map { $0.sealed.keyId })
+            do {
+                guard !uploads.isEmpty else { throw UploadEngineError.noScan }
+                try engine.enqueueRecapture(sessionId: r.sessionId, steps: steps,
+                                            reason: r.reasons.first?.rawValue ?? "nurse_repeat", artefacts: uploads)
+                storage.destroy(sealed.filter { !used.contains($0.sealed.keyId) })
+                UploadCoordinator.shared?.drainSoon()
+            } catch {
+                storage.destroy(sealed)
+            }
         }
     }
 }

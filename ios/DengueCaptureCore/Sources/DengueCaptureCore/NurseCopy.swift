@@ -78,6 +78,13 @@ public enum NurseCopy {
     public static let statusSent = "Sent"
     public static let statusClosed = "Finished"
     public static let buttonRecordAgain = "Record again"
+    // C2: sign-in and idle lock
+    public static let titleSignIn = "Sign in to DengueSense"
+    public static let buttonSignIn = "Sign in"
+    public static let signInFailed = "Sign-in did not complete. Try again."
+    public static let signInNotConfigured = "This phone is not set up yet. Contact the study coordinator."
+    public static let lockedIdle = "Locked after 10 minutes without use."
+    public static let buttonUnlock = "Unlock"
 
     // Reference / experimental display
     public static let monitorPrefix = "Monitor pulse"
@@ -193,6 +200,7 @@ public enum NurseCopy {
             cameraDenied, lowStorage, lowBattery, lowBatteryWarning, interrupted, offlineQueued,
             recentScan, repeatNoticeLead, repeatNoticeTail, repeatNotificationLead,
             uploadRejected, unsentWarning, statusQueued, statusUploading, statusSent, statusClosed, buttonRecordAgain,
+            titleSignIn, buttonSignIn, signInFailed, signInNotConfigured, lockedIdle, buttonUnlock,
             monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,
             skipMonitorUnavailable, skipPatientNotOnMonitor, labelStudyID, labelBed, buttonLookUp,
             buttonContinue, buttonAgree, buttonDecline, buttonStart, buttonPause, buttonSkip, buttonDone,

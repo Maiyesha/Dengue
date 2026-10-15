@@ -14,7 +14,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // Minor: no system permission prompt during UI tests (it would cover the app).
+        if ProcessInfo.processInfo.environment["UITEST_FAKE_CAMERA"] == nil {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         application.registerForRemoteNotifications()
         // T13: capture storage first (plaintext sweep, close sessions left open, reconcile sealed files), then
         // held hand-offs are retried on launch, foreground and managed-config change.

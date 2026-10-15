@@ -43,12 +43,17 @@ public final class OIDCSignIn: NSObject, ASWebAuthenticationPresentationContextP
     private let keychainService = "ai.reainmaker.denguecapture.oidc"
     private var web: ASWebAuthenticationSession?
 
-    public init(config: OIDCConfig, policy: SessionPolicy, session: URLSession = .shared) {
+    /// `session`: pass `NetworkSecurity.authSession()` (TLS 1.3, pinned); `.shared` is never used in production.
+    public init(config: OIDCConfig, policy: SessionPolicy, session: URLSession) {
         self.config = config; self.policy = policy; self.session = session
     }
 
-    public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first ?? ASPresentationAnchor()
+    /// The protocol requirement is nonisolated; ASWebAuthenticationSession calls it on the main thread.
+    nonisolated public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        MainActor.assumeIsolated {
+            UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+                ?? ASPresentationAnchor()
+        }
     }
 
     // MARK: Sign-in
