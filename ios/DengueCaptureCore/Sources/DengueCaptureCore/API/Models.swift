@@ -216,13 +216,47 @@ public struct DeclareArtefactRequest: Codable, Equatable {
     /// Lowercase hex SHA-256 of the SEALED (uploaded) bytes.
     public var sha256: String
     public var deviceVerdict: DeviceVerdict?
+    /// The artefact data key wrapped for the server KMS (sent as `wrapped_key`, `key_alg`, `kms_key_id`).
+    public var wrappedKey: WrappedKey?
     public init(step: CaptureStepName, attempt: Int, kind: ArtefactKind, sizeBytes: Int64, sha256: String,
-                deviceVerdict: DeviceVerdict? = nil) {
+                deviceVerdict: DeviceVerdict? = nil, wrappedKey: WrappedKey? = nil) {
         self.step = step; self.attempt = attempt; self.kind = kind
         self.sizeBytes = sizeBytes; self.sha256 = sha256; self.deviceVerdict = deviceVerdict
+        self.wrappedKey = wrappedKey
     }
     enum CodingKeys: String, CodingKey {
         case step, attempt, kind, sizeBytes = "size_bytes", sha256, deviceVerdict = "device_verdict"
+        case wrappedKey = "wrapped_key", keyAlg = "key_alg", kmsKeyId = "kms_key_id"
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        step = try c.decode(CaptureStepName.self, forKey: .step)
+        attempt = try c.decode(Int.self, forKey: .attempt)
+        kind = try c.decode(ArtefactKind.self, forKey: .kind)
+        sizeBytes = try c.decode(Int64.self, forKey: .sizeBytes)
+        sha256 = try c.decode(String.self, forKey: .sha256)
+        deviceVerdict = try c.decodeIfPresent(DeviceVerdict.self, forKey: .deviceVerdict)
+        if let w = try c.decodeIfPresent(String.self, forKey: .wrappedKey),
+           let alg = try c.decodeIfPresent(String.self, forKey: .keyAlg),
+           let kid = try c.decodeIfPresent(String.self, forKey: .kmsKeyId) {
+            wrappedKey = WrappedKey(wrappedKeyB64: w, alg: alg, kmsKeyId: kid)
+        } else {
+            wrappedKey = nil
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(step, forKey: .step)
+        try c.encode(attempt, forKey: .attempt)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(sizeBytes, forKey: .sizeBytes)
+        try c.encode(sha256, forKey: .sha256)
+        try c.encodeIfPresent(deviceVerdict, forKey: .deviceVerdict)
+        if let w = wrappedKey {
+            try c.encode(w.wrappedKeyB64, forKey: .wrappedKey)
+            try c.encode(w.alg, forKey: .keyAlg)
+            try c.encode(w.kmsKeyId, forKey: .kmsKeyId)
+        }
     }
 }
 

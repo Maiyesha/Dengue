@@ -329,7 +329,9 @@ final class APIClientTests: XCTestCase {
         let d = try await api.declareArtefact(
             scanId: uid, request: DeclareArtefactRequest(step: .neutralFace, attempt: 1, kind: .video,
                                                          sizeBytes: 10, sha256: String(repeating: "a", count: 64),
-                                                         deviceVerdict: .accept), idempotencyKey: "k3")
+                                                         deviceVerdict: .accept,
+                                                         wrappedKey: WrappedKey(wrappedKeyB64: "QUJD", kmsKeyId: "kms")),
+            idempotencyKey: "k3")
         XCTAssertNil(d.uploadId)
         _ = try await api.partURL(artefactId: uid, part: 1)
         let comp = try await api.completeArtefact(id: uid, idempotencyKey: "k4")

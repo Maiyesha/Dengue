@@ -161,7 +161,8 @@ final class UploadEngineTests: XCTestCase {
         for i in 0..<size { bytes[i] = UInt8.random(in: 0...255) }
         try bytes.write(to: path)
         let sealed = SealedArtefact(keyId: keyId, path: path, sha256OfPlaintext: "plain-sha", sizeBytes: Int64(size) - 40,
-                                    sha256OfCiphertext: String(repeating: "c", count: 64), sealedSizeBytes: Int64(size))
+                                    sha256OfCiphertext: String(repeating: "c", count: 64), sealedSizeBytes: Int64(size),
+                                    wrappedKey: WrappedKey(wrappedKeyB64: "d3JhcHBlZA==", kmsKeyId: "kms-test"))
         return ArtefactUpload(step: step, attempt: 1, kind: kind, deviceVerdict: .accept, sealed: sealed)
     }
 

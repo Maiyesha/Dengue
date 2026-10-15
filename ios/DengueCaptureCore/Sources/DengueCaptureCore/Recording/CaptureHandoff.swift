@@ -23,6 +23,9 @@ public enum CaptureHandoffError: Error, Equatable {
     case uploadNotConfigured
     /// Local outbox write failed; carries only the error's type name.
     case enqueueFailed(String)
+    /// No server KMS public key (Managed App Config `kms_public_key_pem` / `kms_key_id`): artefact data keys
+    /// cannot be wrapped for the server, so nothing is uploaded yet (C1).
+    case kmsKeyMissing
 
     /// PHI-free diagnostic for logs and the outbox screen's engineering detail.
     public var diagnostic: String {
@@ -33,6 +36,7 @@ public enum CaptureHandoffError: Error, Equatable {
         case .patientUnknown: return "HANDOFF_PATIENT_UNKNOWN"
         case .uploadNotConfigured: return "HANDOFF_UPLOAD_NOT_CONFIGURED"
         case .enqueueFailed(let t): return "HANDOFF_ENQUEUE_FAILED:" + t
+        case .kmsKeyMissing: return "KMS_KEY_MISSING"
         }
     }
 

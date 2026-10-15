@@ -100,7 +100,7 @@ final class RecordingFixTests: XCTestCase {
 
     private func service() throws -> CaptureHandoffService {
         CaptureHandoffService(store: try FileHeldHandoffStore(directory: dir.appendingPathComponent("held"), keys: keys),
-                              keys: keys)
+                              keys: keys, keyWrapper: FakeKeyWrapper())
     }
 
     private func alive(_ a: SealedStepArtefact) -> Bool {
@@ -294,7 +294,8 @@ final class RecordingFixTests: XCTestCase {
         let held = try XCTUnwrap(try FileHeldHandoffStore(directory: dir.appendingPathComponent("held"), keys: keys)
             .loadAll().first)
         XCTAssertEqual(held.stage, .engineOwned)
-        XCTAssertEqual(held.artefacts, a)   // kept for ensureSessionItems; not shredded by a discard
+        XCTAssertEqual(held.artefacts.map { $0.sealed.keyId }, a.map { $0.sealed.keyId })   // kept for ensureSessionItems
+        XCTAssertTrue(held.artefacts.allSatisfy { $0.sealed.wrappedKey != nil })   // C1: wrapped before enqueue
 
         store.failKinds = []
         XCTAssertEqual(svc.retryHeld(engine: engine), [p.sessionId: .enqueued])

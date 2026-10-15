@@ -229,6 +229,7 @@ public final class UploadEngine {
 
     enum LocalFailure: Error {
         case badPayload, missingRecord, missingArtefact, missingScanId, notDeclared, localFileMissing, tooManyParts
+        case kmsKeyMissing
         var code: String {
             switch self {
             case .badPayload: return "LOCAL_BAD_PAYLOAD"
@@ -238,6 +239,7 @@ public final class UploadEngine {
             case .notDeclared: return "LOCAL_NOT_DECLARED"
             case .localFileMissing: return "LOCAL_FILE_MISSING"
             case .tooManyParts: return "LOCAL_TOO_MANY_PARTS"
+            case .kmsKeyMissing: return "KMS_KEY_MISSING"
             }
         }
     }
@@ -259,9 +261,11 @@ public final class UploadEngine {
         case .declareArtefact:
             let (rec, a) = try artefact(for: item)
             guard let scanId = rec.scanId else { throw LocalFailure.missingScanId }
+            // C1: the server can only read the artefact with the data key wrapped for its KMS.
+            guard let wrapped = a.sealed.wrappedKey else { throw LocalFailure.kmsKeyMissing }
             let req = DeclareArtefactRequest(step: a.step, attempt: a.attempt, kind: a.kind,
                                              sizeBytes: a.sealed.sealedSizeBytes, sha256: a.sealed.sha256OfCiphertext,
-                                             deviceVerdict: a.deviceVerdict)
+                                             deviceVerdict: a.deviceVerdict, wrappedKey: wrapped)
             let resp = try await api.declareArtefact(scanId: scanId, request: req, idempotencyKey: key)
             try updateArtefact(item.sessionId, a.localId) {
                 $0.serverArtefactId = resp.artefactId

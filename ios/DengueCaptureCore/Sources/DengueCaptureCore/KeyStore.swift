@@ -44,6 +44,12 @@ public final class InMemoryKeyStore: KeyStore {
         keys[id] = nil
     }
 
+    /// Tests / fixtures: a known key under an arbitrary id.
+    public func insert(_ key: SymmetricKey, id: String) {
+        lock.lock(); defer { lock.unlock() }
+        keys[id] = key
+    }
+
     /// Tests: a key under an arbitrary id.
     public func insertForTesting(id: String) {
         lock.lock(); defer { lock.unlock() }

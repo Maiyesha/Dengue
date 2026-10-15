@@ -162,7 +162,7 @@ final class RecordingFix2Tests: XCTestCase {
         obStore.failKinds = [.createScan]
         let (e, ob) = engine(obStore)
         let st = try store()
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         XCTAssertEqual(svc.submit(p, engine: e), .held(.enqueueFailed("Injected")))
         XCTAssertNotNil(e.record(p.sessionId))
         let held = try XCTUnwrap(try st.load(p.sessionId))
@@ -183,7 +183,7 @@ final class RecordingFix2Tests: XCTestCase {
         let obStore = FlakyOutboxStore()
         obStore.failKinds = [.clinicalData]
         let (e, _) = engine(obStore)
-        let svc = CaptureHandoffService(store: try store(), keys: keys)
+        let svc = CaptureHandoffService(store: try store(), keys: keys, keyWrapper: FakeKeyWrapper())
         XCTAssertEqual(svc.submit(p, engine: e), .held(.enqueueFailed("Injected")))
         try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
         XCTAssertTrue(a.allSatisfy(alive))
@@ -196,7 +196,7 @@ final class RecordingFix2Tests: XCTestCase {
         let p = pending(a)
         let st = try store()
         st.failSave = true
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         XCTAssertEqual(svc.submit(p, engine: nil), .holdFailed(.uploadNotConfigured))
         let (e, ob) = engine(FlakyOutboxStore())
         let report = svc.sweep(captureDirectory: dir.appendingPathComponent("capture"), sealedDirectory: sealedDir,
@@ -212,7 +212,7 @@ final class RecordingFix2Tests: XCTestCase {
         let a = try sealed(.neutralFace)
         let p = pending(a)
         let st = try store()
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         let (e, _) = engine(FlakyOutboxStore())
         var report: SweepReport?
         st.onSave = {   // the first save inside submit: nothing is persisted or engine-owned yet
@@ -228,7 +228,7 @@ final class RecordingFix2Tests: XCTestCase {
 
     func testUnreadableRecordIsSkippedListedAndDiscardable() throws {
         let st = try store()
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         let good = pending(try sealed(.neutralFace))
         let bad = pending(try sealed(.fingertipPPG))
         XCTAssertEqual(svc.submit(good, engine: nil), .held(.uploadNotConfigured))
@@ -262,7 +262,7 @@ final class RecordingFix2Tests: XCTestCase {
 
     func testRetryDoesNotResealUnchangedHold() throws {
         let st = try store()
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         _ = svc.submit(pending(try sealed(.neutralFace)), engine: nil)
         XCTAssertEqual(st.saves, 1)
         _ = svc.retryHeld(engine: nil)
@@ -305,7 +305,7 @@ final class RecordingFix2Tests: XCTestCase {
         let st = try store()
         try st.save(p)                                              // ...but the held record still says .session
         XCTAssertEqual(try st.load(p.sessionId)?.stage, .session)
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
         XCTAssertTrue(a.allSatisfy(alive))
         XCTAssertNil(try st.load(p.sessionId))
@@ -319,7 +319,7 @@ final class RecordingFix2Tests: XCTestCase {
         let (e, _) = engine(obStore)
         let st = try store()
         st.failAfter = 1   // pre-enqueue save (.session) succeeds; the .engineOwned hold save fails
-        let svc = CaptureHandoffService(store: st, keys: keys)
+        let svc = CaptureHandoffService(store: st, keys: keys, keyWrapper: FakeKeyWrapper())
         XCTAssertEqual(svc.submit(p, engine: e), .holdFailed(.enqueueFailed("Injected")))
         st.failAfter = nil
         XCTAssertEqual(try st.load(p.sessionId)?.stage, .session)
@@ -330,7 +330,7 @@ final class RecordingFix2Tests: XCTestCase {
     func testDiscardWithoutEngineRecordStillShreds() throws {
         let a = try sealed(.neutralFace)
         let p = pending(a)
-        let svc = CaptureHandoffService(store: try store(), keys: keys)
+        let svc = CaptureHandoffService(store: try store(), keys: keys, keyWrapper: FakeKeyWrapper())
         XCTAssertEqual(svc.submit(p, engine: nil), .held(.uploadNotConfigured))
         let (e, _) = engine(FlakyOutboxStore())
         try svc.discard(sessionId: p.sessionId, reason: .nurseDiscard, engine: e)
@@ -353,7 +353,7 @@ final class RecordingFix2Tests: XCTestCase {
         var p = pending(try sealed(.neutralFace))
         p.metadata = m
         let (e, ob) = engine(FlakyOutboxStore())
-        let svc = CaptureHandoffService(store: try store(), keys: keys)
+        let svc = CaptureHandoffService(store: try store(), keys: keys, keyWrapper: FakeKeyWrapper())
         let outcome = svc.submit(p, engine: e)
         XCTAssertEqual(outcome, .held(.metadataOutOfRange(["distance_cm", "angle_deg", "lighting_lux"])))
         XCTAssertNil(e.record(p.sessionId))

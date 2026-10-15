@@ -220,9 +220,19 @@ public final class CaptureHandoffService {
     private var memoryHolds: [UUID: PendingHandoff] = [:]
     /// Sessions inside `process` right now.
     private var inProgress: [UUID: PendingHandoff] = [:]
+    private var wrapper: KeyWrapper?
 
-    public init(store: HeldHandoffStoring, keys: KeyStore, handoff: CaptureHandoff = CaptureHandoff()) {
-        self.store = store; self.keys = keys; self.handoff = handoff
+    /// `keyWrapper`: wraps artefact data keys for the server KMS (C1). nil (KMS config missing) holds every
+    /// hand-off whose accepted artefacts are not wrapped yet with `KMS_KEY_MISSING`.
+    public init(store: HeldHandoffStoring, keys: KeyStore, keyWrapper: KeyWrapper?,
+                handoff: CaptureHandoff = CaptureHandoff()) {
+        self.store = store; self.keys = keys; self.wrapper = keyWrapper; self.handoff = handoff
+    }
+
+    /// Managed-config change: the next `retryHeld` wraps with the new key.
+    public var keyWrapper: KeyWrapper? {
+        get { lock.lock(); defer { lock.unlock() }; return wrapper }
+        set { lock.lock(); wrapper = newValue; lock.unlock() }
     }
 
     /// Persists an in-progress session (call after each sealed step) so a crash never orphans its artefacts.
@@ -313,6 +323,20 @@ public final class CaptureHandoffService {
         defer { inProgress[input.sessionId] = nil }
         guard let engine else { return hold(p, .uploadNotConfigured, original) }
         guard let patientId = p.patientId else { return hold(p, .patientUnknown, original) }
+
+        // C1: every artefact that will be uploaded needs its data key wrapped for the server KMS. Keys sealed
+        // without a configured KMS key are wrapped now (the device key still exists until received_verified).
+        let accepted = Set(p.attempts.filter { $0.verdict == .accept }.map { "\($0.step.rawValue)#\($0.attempt)" })
+        for i in p.artefacts.indices where p.artefacts[i].sealed.wrappedKey == nil
+            && accepted.contains("\(p.artefacts[i].step.rawValue)#\(p.artefacts[i].attempt)") {
+            guard let wrapper else { return hold(p, .kmsKeyMissing, original) }
+            do {
+                p.artefacts[i].sealed.wrappedKey = try wrapper.wrap(try keys.key(id: p.artefacts[i].sealed.keyId))
+            } catch {
+                return hold(p, .enqueueFailed(error), original)
+            }
+        }
+        inProgress[p.sessionId] = p
 
         var plan: CaptureSessionPlan
         do {

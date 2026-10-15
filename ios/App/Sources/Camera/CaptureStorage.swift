@@ -40,8 +40,21 @@ final class CaptureStorage: @unchecked Sendable {
                                            protection: .completeUntilFirstUserAuthentication)
         let keys = SecureEnclaveKeyStore()
         self.keys = keys
-        handoffs = CaptureHandoffService(store: try FileHeldHandoffStore(directory: heldDirectory, keys: keys), keys: keys)
+        handoffs = CaptureHandoffService(store: try FileHeldHandoffStore(directory: heldDirectory, keys: keys), keys: keys,
+                                         keyWrapper: Self.kmsWrapper())
     }
+
+    /// C1: server KMS public key from Managed App Config (`kms_public_key_pem`, `kms_key_id`). nil when missing or
+    /// invalid: hand-offs are then HELD with `KMS_KEY_MISSING` until MDM provides it.
+    static func kmsWrapper(_ defaults: UserDefaults = .standard) -> KeyWrapper? {
+        let managed = defaults.dictionary(forKey: "com.apple.configuration.managed") ?? [:]
+        guard let pem = managed["kms_public_key_pem"] as? String,
+              let kid = managed["kms_key_id"] as? String, !kid.isEmpty else { return nil }
+        return try? RSAKeyWrapper(publicKeyPEM: pem, kmsKeyId: kid)
+    }
+
+    /// Managed-config change: pick up a new (or removed) KMS key before held hand-offs are retried.
+    func reloadKMSConfig() { handoffs.keyWrapper = Self.kmsWrapper() }
 
     /// Creates the directory with `protection`, excludes it from backup and reads the class back.
     private static func directory(_ url: URL, protection: FileProtectionType) throws -> URL {
@@ -74,6 +87,7 @@ final class CaptureStorage: @unchecked Sendable {
 
     /// Foreground, managed-config change, and launch.
     func retryHeld() {
+        reloadKMSConfig()
         handle(handoffs.retryHeld(engine: engine).values)
     }
 
@@ -144,7 +158,8 @@ final class CaptureStorage: @unchecked Sendable {
         // Class B allows creating new files while locked.
         try? trace.encoded().write(to: traceURL, options: [.atomic, .completeFileProtectionUnlessOpen])
         try? metadata.encoded().write(to: metaURL, options: [.atomic, .completeFileProtectionUnlessOpen])
-        let sealer = ArtefactSealer(keys: keys)
+        // The DEK is wrapped for the server KMS while it is in memory; without config the hand-off wraps it later.
+        let sealer = ArtefactSealer(keys: keys, wrapper: handoffs.keyWrapper)
         var out: [SealedStepArtefact] = []
         for (kind, url) in [(ArtefactKind.video, video), (.roiTrace, traceURL), (.metadata, metaURL)] {
             guard FileManager.default.fileExists(atPath: url.path) else { continue }

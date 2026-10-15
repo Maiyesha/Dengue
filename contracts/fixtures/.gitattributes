@@ -1,0 +1,3 @@
+*.sealed binary
+*.bin binary
+*.pem -text eol=lf

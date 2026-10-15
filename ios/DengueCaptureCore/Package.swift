@@ -4,7 +4,10 @@ import PackageDescription
 var packageDependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
 ]
-var coreDependencies: [Target.Dependency] = [.product(name: "Crypto", package: "swift-crypto")]
+var coreDependencies: [Target.Dependency] = [
+    .product(name: "Crypto", package: "swift-crypto"),
+    .product(name: "_CryptoExtras", package: "swift-crypto")
+]
 #if !os(Windows)
 packageDependencies.append(.package(url: "https://github.com/groue/GRDB.swift.git", from: "6.0.0"))
 coreDependencies.append(.product(name: "GRDB", package: "GRDB.swift"))
@@ -22,6 +25,8 @@ let package = Package(
             name: "DengueCaptureCore",
             dependencies: coreDependencies
         ),
-        .testTarget(name: "DengueCaptureCoreTests", dependencies: ["DengueCaptureCore"])
+        .testTarget(name: "DengueCaptureCoreTests", dependencies: [
+            "DengueCaptureCore", .product(name: "_CryptoExtras", package: "swift-crypto")
+        ])
     ]
 )

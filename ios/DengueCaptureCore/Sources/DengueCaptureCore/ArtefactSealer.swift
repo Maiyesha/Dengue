@@ -17,15 +17,19 @@ public struct SealedArtefact: Codable, Equatable {
     public var sha256OfCiphertext: String
     /// Size of the sealed file in bytes (sent in the artefact declare).
     public var sealedSizeBytes: Int64
+    /// The data key wrapped for the server KMS (C1 envelope encryption); sent in the artefact declare.
+    /// nil when no KMS public key was configured at seal time (the hand-off wraps it later or holds).
+    public var wrappedKey: WrappedKey?
 
     public init(keyId: String, path: URL, sha256OfPlaintext: String, sizeBytes: Int64,
-                sha256OfCiphertext: String, sealedSizeBytes: Int64) {
+                sha256OfCiphertext: String, sealedSizeBytes: Int64, wrappedKey: WrappedKey? = nil) {
         self.keyId = keyId
         self.path = path
         self.sha256OfPlaintext = sha256OfPlaintext
         self.sizeBytes = sizeBytes
         self.sha256OfCiphertext = sha256OfCiphertext
         self.sealedSizeBytes = sealedSizeBytes
+        self.wrappedKey = wrappedKey
     }
 }
 
@@ -44,13 +48,22 @@ public struct ArtefactSealer {
     static let tagLen = 16
 
     private let keys: KeyStore
+    private let wrapper: KeyWrapper?
 
-    public init(keys: KeyStore) { self.keys = keys }
+    /// `wrapper`: when given, each new data key is also wrapped for the server KMS at seal time.
+    public init(keys: KeyStore, wrapper: KeyWrapper? = nil) { self.keys = keys; self.wrapper = wrapper }
 
     // MARK: seal
 
     public func seal(input: URL, output: URL) throws -> SealedArtefact {
         let (keyId, key) = try keys.newKey()
+        let wrapped: WrappedKey?
+        do {
+            wrapped = try wrapper?.wrap(key)
+        } catch {
+            try? keys.destroy(id: keyId)   // never leave an orphaned key behind
+            throw error
+        }
         let reader = try FileHandle(forReadingFrom: input)
         defer { try? reader.close() }
 
@@ -103,7 +116,7 @@ public struct ArtefactSealer {
         return SealedArtefact(
             keyId: keyId, path: output,
             sha256OfPlaintext: Self.hex(plainHash.finalize()), sizeBytes: plainSize,
-            sha256OfCiphertext: Self.hex(sealedHash.finalize()), sealedSizeBytes: sealedSize)
+            sha256OfCiphertext: Self.hex(sealedHash.finalize()), sealedSizeBytes: sealedSize, wrappedKey: wrapped)
     }
 
     // MARK: open
