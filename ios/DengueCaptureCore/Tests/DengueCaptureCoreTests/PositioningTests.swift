@@ -101,6 +101,29 @@ final class PositioningTests: XCTestCase {
         XCTAssertEqual(f.machineState, .recording(.neutralFace, attempt: 1))
     }
 
+    // MARK: I2 repeat flow
+
+    func testBeginRepeatStartsAtAssentWithOnlyTheListedSteps() {
+        let repeatProtocol = CaptureProtocol.repeatProtocol(steps: [.fingertipPPG])
+        XCTAssertEqual(repeatProtocol.steps.map { $0.step }, [.fingertipPPG])
+        let f = CaptureFlow(protocol: repeatProtocol, preflight: Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8))
+        f.beginRepeat(maskedCode: "\u{2022}\u{2022}417")
+        XCTAssertEqual(f.screen, .assent)
+        XCTAssertEqual(f.participantCode, "\u{2022}\u{2022}417")
+        XCTAssertTrue(f.isRepeat)
+        f.giveAssent()
+        FlowChecklistItem.allCases.forEach { f.setChecklist($0, ticked: true) }
+        f.proceedFromChecklist()
+        f.skipVitals(reason: .monitorUnavailable)
+        XCTAssertEqual(f.machineState, .positioning(.fingertipPPG))
+        f.reset()
+        XCTAssertFalse(f.isRepeat)
+        let other = CaptureFlow(preflight: Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8))
+        other.selectPatient(participantCode: "DS-1", bedLabel: nil)
+        other.beginRepeat(maskedCode: "x")   // only from patient select
+        XCTAssertEqual(other.screen, .consent)
+    }
+
     // MARK: ExposurePlanner
 
     func testISOScalesToKeepExposureAndClamps() {

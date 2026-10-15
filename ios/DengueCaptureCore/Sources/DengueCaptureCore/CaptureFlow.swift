@@ -171,6 +171,9 @@ public final class CaptureFlow {
     public private(set) var lastGuidanceTime: Double?
     private var readySince: Double?
 
+    /// I2: recording a server-requested repeat of an existing session (consent is re-checked by the server).
+    public private(set) var isRepeat = false
+
     private var consentMessage: String?
     private var assentGiven = false
     private var showedSaved = false
@@ -339,6 +342,16 @@ public final class CaptureFlow {
         screen = .consent
     }
 
+    /// I2: start a repeat recording for an existing session. Only from patient selection; goes straight to
+    /// assent (the server re-checks consent on recapture and on every artefact; a DS_REG_* stop quarantines).
+    /// `maskedCode` ("••417") is the only identifier shown.
+    public func beginRepeat(maskedCode: String) {
+        guard screen == .patientSelect else { return }
+        participantCode = maskedCode
+        isRepeat = true
+        screen = .assent
+    }
+
     /// Capture is allowed only when the server says so. Offline, the cached snapshot must be at most 24 h old.
     public func submitConsent(_ status: ConsentStatus, snapshotAt: Date, online: Bool, now: Date) {
         guard screen == .consent else { return }
@@ -498,6 +511,7 @@ public final class CaptureFlow {
         // thermalHold is device state, not patient state: deliberately kept.
         consentMessage = nil; assentGiven = false; machine = nil
         resetPositioning()
+        isRepeat = false
     }
 
     private func syncScreen() {

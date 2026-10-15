@@ -43,3 +43,13 @@ public struct CaptureProtocol: Codable, Equatable {
         maxRecapturesPerStep: 2,
         showExperimentalAtBedside: false)
 }
+
+extension CaptureProtocol {
+    /// I2: a server-requested repeat records only `steps` (same durations and recapture rules as Phase A).
+    public static func repeatProtocol(steps: [CaptureStepName], base: CaptureProtocol = .phaseADefault) -> CaptureProtocol {
+        let wanted = Set(steps.map { $0.rawValue })
+        return CaptureProtocol(version: base.version, steps: base.steps.filter { wanted.contains($0.step.rawValue) },
+                               maxRecapturesPerStep: base.maxRecapturesPerStep,
+                               showExperimentalAtBedside: base.showExperimentalAtBedside)
+    }
+}
