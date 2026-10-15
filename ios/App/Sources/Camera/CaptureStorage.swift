@@ -81,6 +81,7 @@ final class CaptureStorage: @unchecked Sendable {
         let first: Bool = { lock.lock(); defer { lock.unlock() }; let f = !launched; launched = true; return f }()
         guard first else { retryHeld(); return }
         try? handoffs.closeOpen()
+        if let engine { handoffs.removeObsolete(engine: engine) }   // R-3 startup repair (record only)
         _ = handoffs.sweep(captureDirectory: captureDirectory, sealedDirectory: sealedDirectory, engine: engine)
         retryHeld()
     }
@@ -137,7 +138,8 @@ final class CaptureStorage: @unchecked Sendable {
         }
     }
 
-    func heldSummaries() -> [HeldHandoffSummary] { (try? handoffs.heldSummaries()) ?? [] }
+    /// R-3: obsolete records (session already owned by the engine, nothing of their own) are not listed.
+    func heldSummaries() -> [HeldHandoffSummary] { (try? handoffs.heldSummaries(engine: engine)) ?? [] }
 
     /// Explicit nurse discard (or consent stop / quarantine): the only path that shreds a held session.
     func discard(_ sessionId: UUID, reason: DiscardReason) {

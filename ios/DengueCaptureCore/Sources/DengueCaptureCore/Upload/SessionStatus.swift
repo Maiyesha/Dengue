@@ -56,6 +56,9 @@ public struct SessionSummary: Equatable {
 }
 
 extension HeldHandoffSummary {
-    /// Held records are by definition not sent: flagged 7 days after capture.
-    public func unsentTooLong(now: Date) -> Bool { RetentionPolicy.isUnsentTooLong(capturedAt: capturedAt, now: now) }
+    /// Held records are by definition not sent: flagged 7 days after capture. R-3: only records that still need
+    /// action (a clip-only record is never sent by design).
+    public func unsentTooLong(now: Date) -> Bool {
+        needsAction && RetentionPolicy.isUnsentTooLong(capturedAt: capturedAt, now: now)
+    }
 }

@@ -443,6 +443,9 @@ final class FlowCoordinator: ObservableObject {
                 let arts = await sealing.value
                 guard let self, self.sessionId == session, !self.handedOff else { return }
                 self.sealedSoFar += arts
+                // R-3: a server-requested repeat never checkpoints a standalone hand-off of the original session
+                // (no patient id: it would be held as HANDOFF_PATIENT_UNKNOWN). It ends in enqueueRecapture.
+                guard self.repeatRequest == nil else { return }
                 CaptureStorage.shared?.checkpoint(self.pending(artefacts: self.sealedSoFar))
             }
         } else {
@@ -491,6 +494,8 @@ final class FlowCoordinator: ObservableObject {
     /// server's next attempt number per step. Device-rejected local attempts are not server attempts and are
     /// destroyed. If the repeat cannot be queued (window passed, no KMS key) its artefacts are destroyed: the
     /// session itself is already on the server.
+    /// R-3: the logic lives in core `CaptureHandoffService.submitRepeat`, which never leaves a held hand-off of the
+    /// original session (and removes an obsolete one).
     private func handOffRepeat() {
         guard let r = repeatRequest, handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
         handedOff = true
@@ -501,26 +506,11 @@ final class FlowCoordinator: ObservableObject {
             var sealed: [SealedStepArtefact] = []
             for t in tasks { sealed += await t.value }
             guard let engine = UploadCoordinator.shared?.engine else { storage.destroy(sealed); return }
-            sealed = storage.wrapMissingKeys(sealed)
-            var uploads: [ArtefactUpload] = []
-            var steps: [CaptureStepName] = []
-            for a in sealed {
-                guard let name = CaptureStepName(rawValue: a.step.rawValue), accepted.contains(a.step),
-                      let attempt = engine.recaptureAttempt(sessionId: r.sessionId, step: name) else { continue }
-                if !steps.contains(name) { steps.append(name) }
-                uploads.append(ArtefactUpload(step: name, attempt: attempt, kind: a.kind, deviceVerdict: .accept,
-                                              sealed: a.sealed))
-            }
-            let used = Set(uploads.map { $0.sealed.keyId })
-            do {
-                guard !uploads.isEmpty else { throw UploadEngineError.noScan }
-                try engine.enqueueRecapture(sessionId: r.sessionId, steps: steps,
-                                            reason: r.reasons.first?.rawValue ?? "nurse_repeat", artefacts: uploads)
-                storage.destroy(sealed.filter { !used.contains($0.sealed.keyId) })
-                UploadCoordinator.shared?.drainSoon()
-            } catch {
-                storage.destroy(sealed)
-            }
+            storage.reloadKMSConfig()
+            let outcome = storage.handoffs.submitRepeat(sessionId: r.sessionId,
+                                                        reason: r.reasons.first?.rawValue ?? "nurse_repeat",
+                                                        accepted: accepted, sealed: sealed, engine: engine)
+            if outcome == .enqueued { UploadCoordinator.shared?.drainSoon() }
         }
     }
 }

@@ -244,6 +244,18 @@ public struct HeldHandoffSummary: Equatable {
     public var interruptedClipCount = 0
     /// R-2: the record only keeps interrupted clips (nothing to send).
     public var isInterruptedOnly = false
+
+    /// R-3: the record still has something to send (or to fix). A clip-only record is listed but needs no action.
+    public var needsAction: Bool { !isInterruptedOnly }
+}
+
+/// R-3 / I2: result of handing a server-requested repeat to the upload engine.
+public enum RepeatHandoffOutcome: Equatable {
+    /// `enqueueRecapture` took the accepted artefacts.
+    case enqueued
+    /// Nothing could be queued (window passed, nothing accepted, no KMS key...): the repeat's artefacts were
+    /// destroyed (the session itself is already on the server).
+    case notQueued
 }
 
 public struct SweepReport: Equatable {
@@ -330,9 +342,10 @@ public final class CaptureHandoffService {
         return process(q, original: nil, engine: engine)
     }
 
-    /// Retries every closed, readable held hand-off and every in-memory hold.
+    /// Retries every closed, readable held hand-off and every in-memory hold (after the R-3 obsolete-record repair).
     public func retryHeld(engine: UploadEngine?) -> [UUID: HandoffOutcome] {
         lock.lock(); defer { lock.unlock() }
+        if let engine { removeObsolete(engine: engine) }
         var out: [UUID: HandoffOutcome] = [:]
         let loaded = (try? store.loadEach()) ?? HeldLoadResult(records: [], unreadable: [])
         for p in loaded.records where !p.isOpen && p.stage != .interruptedOnly {
@@ -382,10 +395,12 @@ public final class CaptureHandoffService {
         try store.remove(sessionId)
     }
 
-    public func heldSummaries() throws -> [HeldHandoffSummary] {
+    /// Held records for the Uploads list. R-3: with `engine`, obsolete records (see `isObsolete`) are left out.
+    public func heldSummaries(engine: UploadEngine? = nil) throws -> [HeldHandoffSummary] {
         lock.lock(); defer { lock.unlock() }
         let loaded = try store.loadEach()
-        var out = loaded.records.map {
+        let records = engine.map { e in loaded.records.filter { !isObsolete($0, engine: e) } } ?? loaded.records
+        var out = records.map {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
                                isOpen: $0.isOpen, isUnreadable: false, capturedAt: $0.capturedAt,
                                interruptedClipCount: $0.interruptedClips.count,
@@ -403,6 +418,81 @@ public final class CaptureHandoffService {
                                isInterruptedOnly: $0.stage == .interruptedOnly)
         }
         return out
+    }
+
+    // MARK: R-3 repeats and obsolete records
+
+    /// I2/R-3: a server-requested repeat's accepted artefacts become a recapture of the existing session
+    /// (`UploadEngine.enqueueRecapture`, with the server's next attempt number per step). Device-rejected attempts
+    /// are not server attempts and are destroyed; if nothing can be queued (2 h window passed, nothing accepted,
+    /// no KMS key) every artefact of the repeat is destroyed. A repeat never leaves a held hand-off of the original
+    /// session: any obsolete record for it (e.g. a checkpoint written by an older version) is removed.
+    public func submitRepeat(sessionId: UUID, reason: String, accepted: [CaptureStep], sealed input: [SealedStepArtefact],
+                             engine: UploadEngine) -> RepeatHandoffOutcome {
+        lock.lock(); defer { lock.unlock() }
+        var sealed = input
+        // C1: wrap data keys sealed before a KMS key was configured (the device key still exists).
+        if let wrapper {
+            for i in sealed.indices where sealed[i].sealed.wrappedKey == nil {
+                if let k = try? keys.key(id: sealed[i].sealed.keyId) { sealed[i].sealed.wrappedKey = try? wrapper.wrap(k) }
+            }
+        }
+        var uploads: [ArtefactUpload] = []
+        var steps: [CaptureStepName] = []
+        for a in sealed {
+            guard accepted.contains(a.step), let name = CaptureStepName(rawValue: a.step.rawValue),
+                  let attempt = engine.recaptureAttempt(sessionId: sessionId, step: name) else { continue }
+            if !steps.contains(name) { steps.append(name) }
+            uploads.append(ArtefactUpload(step: name, attempt: attempt, kind: a.kind, deviceVerdict: .accept,
+                                          sealed: a.sealed))
+        }
+        let used = Set(uploads.map { $0.sealed.keyId })
+        defer { removeObsolete(engine: engine, only: sessionId) }
+        do {
+            guard !uploads.isEmpty else { throw UploadEngineError.noScan }
+            try engine.enqueueRecapture(sessionId: sessionId, steps: steps, reason: reason, artefacts: uploads)
+        } catch {
+            for a in sealed { destroy(a.sealed) }
+            return .notQueued
+        }
+        for a in sealed where !used.contains(a.sealed.keyId) { destroy(a.sealed) }
+        return .enqueued
+    }
+
+    /// R-3 startup repair (run by `retryHeld`, so at launch and on foreground): removes held records that are
+    /// obsolete (`isObsolete`). Only the RECORD is removed; artefacts the engine owns are never touched.
+    @discardableResult
+    public func removeObsolete(engine: UploadEngine) -> [UUID] {
+        removeObsolete(engine: engine, only: nil)
+    }
+
+    @discardableResult
+    private func removeObsolete(engine: UploadEngine, only: UUID?) -> [UUID] {
+        lock.lock(); defer { lock.unlock() }
+        guard let loaded = try? store.loadEach() else { return [] }
+        var removed: [UUID] = []
+        for p in loaded.records where (only == nil || p.sessionId == only) && isObsolete(p, engine: engine) {
+            if (try? store.remove(p.sessionId)) != nil {
+                memoryHolds[p.sessionId] = nil
+                removed.append(p.sessionId)
+            }
+        }
+        return removed
+    }
+
+    /// R-3: a held record is obsolete when
+    /// - it is closed (not a capture still running in this process) and keeps no interrupted clips;
+    /// - the engine already owns its session;
+    /// - it has no artefact of its own: every artefact is in the engine's record, or no longer on the phone;
+    /// - and it can never complete itself: no patient id (always HANDOFF_PATIENT_UNKNOWN; the signature of the
+    ///   old repeat checkpoint). A record WITH a patient id is processed instead: `ensureSessionItems` may still
+    ///   have outbox items (e.g. clinical data) to add, and a successful pass removes the record.
+    func isObsolete(_ p: PendingHandoff, engine: UploadEngine) -> Bool {
+        guard !p.isOpen, p.interruptedClips.isEmpty, p.stage != .interruptedOnly, p.patientId == nil,
+              let rec = engine.record(p.sessionId) else { return false }
+        let owned = Set(rec.artefacts.map { $0.sealed.keyId })
+        let fm = FileManager.default
+        return !p.artefacts.contains { !owned.contains($0.sealed.keyId) && fm.fileExists(atPath: $0.sealed.path.path) }
     }
 
     // MARK: processing
