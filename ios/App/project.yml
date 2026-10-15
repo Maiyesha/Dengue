@@ -38,6 +38,14 @@ targets:
       - path: Tests
     dependencies:
       - target: DengueCapture
+  DengueCaptureUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: DengueCapture
 schemes:
   DengueCapture:
     build:
@@ -46,3 +54,4 @@ schemes:
     test:
       targets:
         - DengueCaptureTests
+        - DengueCaptureUITests

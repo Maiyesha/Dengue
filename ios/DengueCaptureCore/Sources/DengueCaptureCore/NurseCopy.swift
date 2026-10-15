@@ -74,6 +74,35 @@ public enum NurseCopy {
     public static let cameraPulseFingertipPrefix = "Camera pulse (fingertip)"
     public static let bpmUnit = "bpm"
 
+    // UI labels (flow screens)
+    public static let skipMonitorUnavailable = "Monitor unavailable"
+    public static let skipPatientNotOnMonitor = "Patient not on a monitor"
+    public static let labelStudyID = "Study ID"
+    public static let labelBed = "Bed"
+    public static let buttonLookUp = "Look up"
+    public static let buttonContinue = "Continue"
+    public static let buttonAgree = "Patient agrees"
+    public static let buttonDecline = "Patient declined today"
+    public static let buttonStart = "Start"
+    public static let buttonPause = "Pause"
+    public static let buttonSkip = "Skip"
+    public static let buttonDone = "Done"
+    public static let buttonNextPatient = "Next patient"
+    public static let titleOutbox = "Uploads"
+    public static let labelSkipReason = "Reason for skipping"
+    public static let labelHeartRate = "Monitor heart rate"
+    public static let labelSpO2 = "SpO2"
+    public static let labelRespRate = "Breathing rate"
+    public static let labelTemperature = "Temperature"
+    public static let labelCapRefill = "Capillary refill"
+    public static let labelSystolic = "Systolic BP"
+    public static let labelDiastolic = "Diastolic BP"
+    public static let stepNameFace = "Neutral face"
+    public static let stepNameFingertip = "Fingertip"
+    public static let stepNameEye = "Eye"
+    public static let stepNameTongue = "Tongue"
+    public static let outboxEmpty = "Nothing waiting to upload"
+
     public static let allCues: [GuidanceCue] = [
         .moveCloser, .moveBack, .centreFace, .tiltPhone, .tooDark, .lightBehind, .holdStill, .ready,
     ]
@@ -124,6 +153,11 @@ public enum NurseCopy {
             cameraDenied, lowStorage, lowBattery, interrupted, offlineQueued,
             recentScan, repeatNoticeLead, repeatNoticeTail,
             monitorPrefix, experimentalChip, cameraPulseFacePrefix, cameraPulseFingertipPrefix, bpmUnit,
+            skipMonitorUnavailable, skipPatientNotOnMonitor, labelStudyID, labelBed, buttonLookUp,
+            buttonContinue, buttonAgree, buttonDecline, buttonStart, buttonPause, buttonSkip, buttonDone,
+            buttonNextPatient, titleOutbox, labelSkipReason, labelHeartRate, labelSpO2, labelRespRate,
+            labelTemperature, labelCapRefill, labelSystolic, labelDiastolic, stepNameFace,
+            stepNameFingertip, stepNameEye, stepNameTongue, outboxEmpty,
         ]
         var all = constants
         for cue in allCues { all.append(text(for: cue)) }
