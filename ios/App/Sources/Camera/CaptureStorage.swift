@@ -81,8 +81,25 @@ final class CaptureStorage: @unchecked Sendable {
     @discardableResult
     func submit(_ p: PendingHandoff) -> HandoffOutcome {
         let outcome = handoffs.submit(p, engine: engine)
-        if outcome == .enqueued { UploadCoordinator.shared?.drainSoon() }
+        switch outcome {
+        case .enqueued: UploadCoordinator.shared?.drainSoon()
+        case .held: break
+        case .holdFailed: scheduleRetry()   // kept in memory by the core service; must not wait for a relaunch
+        }
         return outcome
+    }
+
+    /// A hold could not be persisted (e.g. disk full): retry soon, with backoff, while the process lives.
+    private func scheduleRetry(attempt: Int = 0) {
+        let delay = min(300.0, 15.0 * pow(2.0, Double(attempt)))
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            let results = self.handoffs.retryHeld(engine: self.engine)
+            if results.values.contains(.enqueued) { UploadCoordinator.shared?.drainSoon() }
+            if results.values.contains(where: { if case .holdFailed = $0 { return true }; return false }) {
+                self.scheduleRetry(attempt: attempt + 1)
+            }
+        }
     }
 
     func heldSummaries() -> [HeldHandoffSummary] { (try? handoffs.heldSummaries()) ?? [] }

@@ -9,6 +9,8 @@ import DengueCaptureCore
 final class AppDelegate: NSObject, UIApplicationDelegate {
     private var activeObserver: NSObjectProtocol?
     private var configObserver: NSObjectProtocol?
+    /// Last seen managed app configuration; retries run only when it actually changes.
+    private var lastManagedConfig: NSDictionary?
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
@@ -23,9 +25,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             if let c = UploadCoordinator.shared { Task { await c.foreground() } }
             DispatchQueue.global(qos: .utility).async { CaptureStorage.shared?.retryHeld() }
         }
+        lastManagedConfig = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed") as NSDictionary?
         configObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { _ in
-            // MDM may just have provisioned `api_base_url`: `shared` is re-tried on access.
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            // Only react to a change of the MDM managed configuration (`com.apple.configuration.managed`),
+            // not to every UserDefaults write. `UploadCoordinator.shared` is re-tried on access.
+            let now = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed") as NSDictionary?
+            guard let self, now != self.lastManagedConfig else { return }
+            self.lastManagedConfig = now
             if let c = UploadCoordinator.shared { Task { await c.launch() } }
             DispatchQueue.global(qos: .utility).async { CaptureStorage.shared?.retryHeld() }
         }

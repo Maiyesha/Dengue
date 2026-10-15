@@ -3,6 +3,7 @@ import DengueCaptureCore
 
 /// Per-session upload status. Only the masked study ID (••417) is shown; no other patient identifier.
 /// Held hand-offs (saved on the phone, not yet queued) can only be removed here, by an explicit nurse delete.
+/// Unreadable held records are listed as such and can be deleted too.
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 struct OutboxView: View {
@@ -19,8 +20,8 @@ struct OutboxView: View {
                 ForEach(held, id: \.sessionId) { h in
                     HStack {
                         VStack(alignment: .leading) {
-                            Text(h.maskedCode).font(.headline)
-                            Text(NurseCopy.heldWaiting)
+                            if !h.isUnreadable { Text(h.maskedCode).font(.headline) }
+                            Text(h.isUnreadable ? NurseCopy.heldUnreadable : NurseCopy.heldWaiting)
                         }
                         Spacer()
                         if !h.isOpen {
@@ -37,15 +38,23 @@ struct OutboxView: View {
                             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                             titleVisibility: .visible) {
             Button(NurseCopy.buttonDeleteRecording, role: .destructive) {
-                if let h = pendingDelete { CaptureStorage.shared?.discard(h.sessionId, reason: .nurseDiscard) }
+                let target = pendingDelete
                 pendingDelete = nil
-                reload()
+                Task.detached(priority: .userInitiated) {
+                    if let target { CaptureStorage.shared?.discard(target.sessionId, reason: .nurseDiscard) }
+                    let summaries = CaptureStorage.shared?.heldSummaries() ?? []
+                    await MainActor.run { held = summaries }
+                }
             }
         }
     }
 
+    /// Retry and listing decrypt every held record: kept off the main thread.
     private func reload() {
-        CaptureStorage.shared?.retryHeld()
-        held = CaptureStorage.shared?.heldSummaries() ?? []
+        Task.detached(priority: .userInitiated) {
+            CaptureStorage.shared?.retryHeld()
+            let summaries = CaptureStorage.shared?.heldSummaries() ?? []
+            await MainActor.run { held = summaries }
+        }
     }
 }

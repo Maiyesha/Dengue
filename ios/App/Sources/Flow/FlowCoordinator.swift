@@ -131,8 +131,15 @@ final class FlowCoordinator: ObservableObject {
     func toggle(_ item: FlowChecklistItem, _ on: Bool) { flow.setChecklist(item, ticked: on); refresh() }
     func proceedFromChecklist() { flow.proceedFromChecklist(); refresh() }
     func comeBackLater() { flow.comeBackLater(); refresh() }
-    func submitVitals(_ e: [VitalField: VitalEntry]) { flow.submitVitals(e, now: Date()); refresh() }
-    func skipVitals(_ r: VitalsSkipReason?) { flow.skipVitals(reason: r); refresh() }
+    func submitVitals(_ e: [VitalField: VitalEntry]) { enteringCapture(); flow.submitVitals(e, now: Date()); refresh() }
+    func skipVitals(_ r: VitalsSkipReason?) { enteringCapture(); flow.skipVitals(reason: r); refresh() }
+
+    /// Capture-screen entry: devices without a depth-capable TrueDepth front format are blocked before capture
+    /// (`BlockReason.unsupportedDevice`, copy "Camera not ready — try again").
+    private func enteringCapture() {
+        let depth = handoffEnabled ? CameraRecorder.supportsDepthCapture() : true   // UI tests: fake camera
+        flow.updatePreflight(Preflight(freeBytes: 10_000_000_000, batteryLevel: 0.8, supportsDepthCapture: depth))
+    }
 
     /// Pause button, lock, app switch: discards the partial recording; the attempt is not consumed.
     func pause() {

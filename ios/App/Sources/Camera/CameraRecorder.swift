@@ -105,6 +105,17 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
         }
     }
 
+    /// T13 ruling: capture needs a front TrueDepth camera with a depth-capable 1080p30 format (distance_cm).
+    /// Checked at capture-screen entry and fed into `Preflight.supportsDepthCapture`.
+    static func supportsDepthCapture() -> Bool {
+        guard let dev = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) else { return false }
+        return dev.formats.contains { f in
+            let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+            return d.width == 1920 && d.height == 1080 && !f.supportedDepthDataFormats.isEmpty
+                && f.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }
+        }
+    }
+
     // MARK: CaptureCameraProviding
 
     func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
@@ -183,8 +194,8 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
             torchOff()
             let dev: AVCaptureDevice?
             if role == .frontFace {
+                // Devices without TrueDepth are blocked before capture (Preflight.supportsDepthCapture).
                 dev = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front)
-                    ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
             } else {
                 dev = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
             }
