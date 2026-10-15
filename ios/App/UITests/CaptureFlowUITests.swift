@@ -30,6 +30,10 @@ final class CaptureFlowUITests: XCTestCase {
         }
     }
 
+    func dismissKeyboard(_ app: XCUIApplication) {
+        if app.keyboards.count > 0 { app.swipeDown() }
+    }
+
     func label(_ app: XCUIApplication, _ id: String) -> String? {
         let e = app.staticTexts[id]
         return e.waitForExistence(timeout: 5) ? e.label : nil
@@ -42,6 +46,7 @@ final class CaptureFlowUITests: XCTestCase {
         app.buttons["checklist-continue"].tap()
         let hr = app.textFields["vitals-hr"]
         hr.tap(); hr.typeText("88")
+        dismissKeyboard(app)
         app.buttons["vitals-continue"].tap()
     }
 
@@ -74,6 +79,7 @@ final class CaptureFlowUITests: XCTestCase {
         tickChecklist(app)
         app.buttons["checklist-continue"].tap(); assertBanner()
         let hr = app.textFields["vitals-hr"]; hr.tap(); hr.typeText("88")
+        dismissKeyboard(app)
         app.buttons["vitals-continue"].tap(); assertBanner()
         app.buttons["start-button"].tap(); assertBanner()
         app.buttons["start-button"].tap(); assertBanner()

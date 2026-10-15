@@ -157,6 +157,8 @@ public final class CaptureFlow {
     /// One-shot nurse prompt (spec 6.5), e.g. note the monitor HR at 20 s of the face step.
     public private(set) var pendingPrompt: String?
     private var monitorPromptFired = false
+    /// Text each flagged field had when it was flagged; a confirmation only counts for that exact text.
+    private var flaggedText: [VitalField: String] = [:]
     public static let monitorPromptSeconds: Double = 20
     public static let maxSnapshotFutureSkew: TimeInterval = 300
 
@@ -220,8 +222,16 @@ public final class CaptureFlow {
 
     /// Changes whenever anything a view can show changes (lets the coordinator skip no-op refreshes).
     public var stateSignature: String {
-        "\(screen)|\(String(describing: machine?.state))|\(thermalHold)|\(checklist.count)|"
-            + "\(vitalIssues.count)|\(pendingPrompt ?? "")|\(consentMessage ?? "")"
+        "\(screen)|\(String(describing: machine?.state))|\(thermalHold)|\(checklistSignature)|"
+            + "\(issuesSignature)|\(pendingPrompt ?? "")|\(consentMessage ?? "")"
+    }
+
+    private var checklistSignature: String {
+        FlowChecklistItem.allCases.map { checklist.contains($0) ? "1" : "0" }.joined()
+    }
+
+    private var issuesSignature: String {
+        VitalField.allCases.map { f in vitalIssues[f].map { "\(f):\($0)" } ?? "" }.joined(separator: ",")
     }
 
     public func stepReasons(_ step: CaptureStep) -> [ReasonCode] { machine?.lastReasons[step] ?? [] }
@@ -319,9 +329,12 @@ public final class CaptureFlow {
         for field in VitalField.allCases {
             guard let e = entries[field],
                   !e.text.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
-            guard let v = Self.parse(e.text, locale: locale) else { issues[field] = .unparseable; continue }
+            guard let v = Self.parse(e.text, locale: locale) else {
+                issues[field] = .unparseable; flaggedText[field] = e.text; continue
+            }
             let inRange = field.range.contains(v)
-            if !inRange && !e.confirmed { issues[field] = .outOfRange; continue }
+            let confirmed = e.confirmed && (flaggedText[field] == nil || flaggedText[field] == e.text)
+            if !inRange && !confirmed { issues[field] = .outOfRange; flaggedText[field] = e.text; continue }
             records.append(VitalRecord(field: field, value: v, source: e.source,
                                        measuredAt: e.measuredAt ?? now, isInvalid: !inRange))
         }
@@ -415,7 +428,7 @@ public final class CaptureFlow {
         screen = .patientSelect
         participantCode = nil; bedLabel = nil; monitorHR = nil; vitalsSkipReason = nil
         checklist = []; vitalRecords = []; vitalIssues = [:]
-        pendingPrompt = nil; monitorPromptFired = false
+        pendingPrompt = nil; monitorPromptFired = false; flaggedText = [:]
         // thermalHold is device state, not patient state: deliberately kept.
         consentMessage = nil; assentGiven = false; machine = nil
     }

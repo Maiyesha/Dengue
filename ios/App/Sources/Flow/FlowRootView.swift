@@ -11,7 +11,7 @@ struct FlowRootView: View {
             case .assent: AssentView(c: c)
             case .patientDeclined, .comeBackLater: TerminalMessageView(c: c)
             case .checklist: ChecklistView(c: c)
-            case .referenceVitals: ReferenceVitalsView(c: c)
+            case .referenceVitals: NavigationStack { ReferenceVitalsView(c: c) }
             case .capture: CaptureStepView(c: c)
             case .blocked: BlockedView(c: c)
             case .qualityResult: QualityResultView(c: c)

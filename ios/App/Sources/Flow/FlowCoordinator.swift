@@ -126,7 +126,8 @@ final class FlowCoordinator: ObservableObject {
             injectedThermal = true
             flow.thermalChanged(.serious)
         }
-        refresh()        guard case .recording? = flow.machineState else { return }
+        refresh()
+        guard case .recording? = flow.machineState else { return }
         Task {
             let d = await camera.record(step: step, seconds: cfg.targetSeconds)
             guard case .recording? = flow.machineState else { return }  // interrupted meanwhile

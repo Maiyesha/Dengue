@@ -194,4 +194,41 @@ final class CaptureFlowFixTests: XCTestCase {
         f.positioned()
         XCTAssertNotEqual(f.stateSignature, a)
     }
+
+    // Fix round 2
+
+    func testSignatureChangesWhenIssueKindChangesWithSameCount() {
+        let f = flowAtVitals()
+        f.submitVitals([.hr: VitalEntry(text: "abc")], now: now)
+        let a = f.stateSignature
+        XCTAssertEqual(f.vitalIssues[.hr], .unparseable)
+        f.submitVitals([.hr: VitalEntry(text: "250")], now: now)
+        XCTAssertEqual(f.vitalIssues[.hr], .outOfRange)
+        XCTAssertNotEqual(f.stateSignature, a)
+    }
+
+    func testSignatureChangesWhenChecklistContentsChangeWithSameCount() {
+        let f = CaptureFlow(preflight: okPreflight)
+        f.selectPatient(participantCode: "DS-417", bedLabel: nil)
+        f.submitConsent(consent(), snapshotAt: now, online: true, now: now)
+        f.giveAssent()
+        f.setChecklist(.resting, ticked: true)
+        let a = f.stateSignature
+        f.setChecklist(.resting, ticked: false)
+        f.setChecklist(.light, ticked: true)
+        XCTAssertNotEqual(f.stateSignature, a)
+    }
+
+    func testEditingFlaggedValueResetsConfirmation() {
+        let f = flowAtVitals()
+        f.submitVitals([.hr: VitalEntry(text: "250")], now: now)
+        XCTAssertEqual(f.vitalIssues[.hr], .outOfRange)
+        // The nurse ticked confirm, then edited the number; the stale confirmation must not apply.
+        f.submitVitals([.hr: VitalEntry(text: "300", confirmed: true)], now: now)
+        XCTAssertEqual(f.screen, .referenceVitals)
+        XCTAssertEqual(f.vitalIssues[.hr], .outOfRange)
+        f.submitVitals([.hr: VitalEntry(text: "300", confirmed: true)], now: now)
+        XCTAssertEqual(f.screen, .capture, "confirming the new value works")
+        XCTAssertEqual(f.vitalRecords.first?.isInvalid, true)
+    }
 }

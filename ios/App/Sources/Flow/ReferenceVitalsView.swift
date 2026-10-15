@@ -24,8 +24,7 @@ struct ReferenceVitalsView: View {
                     }
                 }
             }
-            Button(NurseCopy.buttonContinue) { c.submitVitals(entries) }
-                .accessibilityIdentifier("vitals-continue")
+
             Section(NurseCopy.labelSkipReason) {
                 Picker(NurseCopy.labelSkipReason, selection: $skipReason) {
                     Text(NurseCopy.buttonSkip).tag(VitalsSkipReason?.none)
@@ -35,10 +34,22 @@ struct ReferenceVitalsView: View {
                     .disabled(skipReason == nil).accessibilityIdentifier("vitals-skip")
             }
         }
+        .scrollDismissesKeyboard(.immediately)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(NurseCopy.buttonContinue) { c.submitVitals(entries) }
+                    .accessibilityIdentifier("vitals-continue")
+            }
+        }
     }
 
     private func binding(_ f: VitalField) -> Binding<VitalEntry> {
-        Binding(get: { entries[f] ?? VitalEntry(text: "") }, set: { entries[f] = $0 })
+        Binding(get: { entries[f] ?? VitalEntry(text: "") }, set: { new in
+            var v = new
+            // Editing the number invalidates any earlier confirmation (core enforces this too).
+            if entries[f]?.text != new.text { v.confirmed = false }
+            entries[f] = v
+        })
     }
 
     private func measured(_ f: VitalField) -> Binding<Date> {
