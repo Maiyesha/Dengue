@@ -17,6 +17,7 @@ final class SignInOverlayModel: ObservableObject {
 
 /// R-2: covers its content with SignInView while sign-in is required. The content (and its FlowCoordinator) stays
 /// alive underneath.
+@MainActor
 struct SignInOverlayModifier: ViewModifier {
     @ObservedObject private var model = SignInOverlayModel.shared
     func body(content: Content) -> some View {

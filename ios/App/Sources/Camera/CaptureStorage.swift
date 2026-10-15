@@ -107,7 +107,16 @@ final class CaptureStorage: @unchecked Sendable {
 
     /// R-2: an interrupted partial clip of a session this process no longer checkpoints (repeat, or handed off).
     func keepInterruptedClip(_ clip: InterruptedClip, sessionId: UUID, maskedCode: String, capturedAt: Date) {
-        try? handoffs.keepInterruptedClip(clip, sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt)
+        // Round 2 (M3): with the engine, a clip never revives an obsolete record.
+        try? handoffs.keepInterruptedClip(clip, sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt,
+                                          engine: engine)
+    }
+
+    /// Round 2 (I4): a repeat flow's accepted artefacts while sign-in is required (`.repeatPending`).
+    func checkpointRepeat(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
+                          accepted: [CaptureStep], sealed: [SealedStepArtefact]) {
+        try? handoffs.checkpointRepeat(sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt,
+                                       reason: reason, accepted: accepted, sealed: sealed)
     }
 
     @discardableResult

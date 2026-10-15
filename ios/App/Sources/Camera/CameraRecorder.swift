@@ -61,6 +61,8 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     private var role: CameraRole?
     private var device: AVCaptureDevice?
     private var videoOutputAdded = false
+    /// Round 2 (I1): which coordinator owns the shared camera (main flow or repeat flow).
+    private let ownership = CameraOwnership()
     private var depthOutputAdded = false
 
     // videoQueue state
@@ -142,7 +144,8 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
 
     // MARK: CaptureCameraProviding
 
-    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+    func startPositioning(step: CaptureStep, owner: UUID, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+        ownership.claim(owner)
         let role: CameraRole
         switch step {
         case .neutralFace: role = .frontFace
@@ -167,8 +170,9 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
         if dev.isFocusModeSupported(.continuousAutoFocus) { dev.focusMode = .continuousAutoFocus }
     }
 
-    func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
+    func record(_ rec: RecordingSession, owner: UUID, seconds: Double, positioning: PositioningSummary?,
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording {
+        ownership.claim(owner)
         let role: CameraRole
         switch rec.step {
         case .neutralFace: role = .frontFace
@@ -218,7 +222,12 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
     func finishEarly(_ rec: RecordingSession) {
         videoQueue.async { [self] in
             positioning = nil
-            guard let a = active, a.token == rec.token else { return }
+            guard let a = active, a.token == rec.token else {
+                // Round 2 (M1): `record` is still configuring (no active attempt yet): end the token now so it can
+                // never start recording under the sign-in overlay (`record` then throws `.cancelled`).
+                rec.finish()
+                return
+            }
             if a.writer == nil || a.startPTS == nil {
                 failActive(RecorderError.cancelled)
             } else {
@@ -228,7 +237,10 @@ final class CameraRecorder: NSObject, CaptureCameraProviding, AVCaptureVideoData
         sessionQueue.async { [self] in torchOff() }
     }
 
-    func stop() {
+    func stop(owner: UUID) {
+        // Round 2 (I1): only the owner (or anyone, when nobody owns it) may stop the shared camera.
+        guard ownership.mayStop(owner) else { return }
+        ownership.release(owner)
         videoQueue.async { [self] in positioning = nil; failActive(RecorderError.cancelled) }
         sessionQueue.async { [self] in
             torchOff()

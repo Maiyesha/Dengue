@@ -100,6 +100,10 @@ final class FlowCoordinator: ObservableObject {
     /// R-2: the recording being ended early because sign-in became required.
     private var authStopping: RecordingSession?
     nonisolated(unsafe) private var authObservers: [NSObjectProtocol] = []
+    /// Round 2 (I1): this coordinator's claim on the shared camera (`stop` is scoped to it).
+    private let cameraOwner = UUID()
+    /// Round 2 (I2): sealing of interrupted clips, awaited by the hand-off like `acceptedSealing`.
+    private var clipSealing: [Task<InterruptedClip?, Never>] = []
 
     /// Bumped after every flow mutation so SwiftUI re-reads the (non-observable) CaptureFlow.
     @Published private(set) var revision = 0
@@ -234,7 +238,7 @@ final class FlowCoordinator: ObservableObject {
         }
         guard positioningStep != step else { return }
         positioningStep = step
-        camera.startPositioning(step: step) { [weak self] cues, t in
+        camera.startPositioning(step: step, owner: cameraOwner) { [weak self] cues, t in
             Task { @MainActor [weak self] in
                 guard let self, self.positioningStep == step else { return }
                 self.flow.guidanceUpdate(cues, at: t)
@@ -280,7 +284,7 @@ final class FlowCoordinator: ObservableObject {
             authStopping = rec
             camera.finishEarly(rec)
         }
-        camera.stop()   // queued after finishEarly on the camera's queues: positioning off, session stopped, torch off
+        camera.stop(owner: cameraOwner)   // queued after finishEarly; a no-op unless this flow owns the camera (I1)
         checkpointForReauth()
         refresh()
     }
@@ -294,7 +298,16 @@ final class FlowCoordinator: ObservableObject {
     /// R-2: the accepted attempts (and interrupted clips) of this session, persisted now as an open checkpoint.
     /// Not for a server-requested repeat (R-3: a repeat never writes a hand-off for the original session).
     private func checkpointForReauth() {
-        guard handoffEnabled, repeatRequest == nil, !handedOff, let storage = CaptureStorage.shared else { return }
+        guard handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
+        if let r = repeatRequest {
+            // Round 2 (I4): a repeat's accepted artefacts go to a `.repeatPending` record (never a hand-off of the
+            // original session); retryHeld routes it to submitRepeat after a kill.
+            let accepted = flow.attemptLog.filter { $0.verdict == .accept }.map { $0.step }
+            storage.checkpointRepeat(sessionId: r.sessionId, maskedCode: r.maskedCode, capturedAt: capturedAt ?? Date(),
+                                     reason: r.reasons.first?.rawValue ?? "nurse_repeat", accepted: accepted,
+                                     sealed: sealedSoFar.filter { a in accepted.contains(a.step) })
+            return
+        }
         storage.checkpointForReauth(pending(artefacts: sealedSoFar))
     }
 
@@ -306,20 +319,31 @@ final class FlowCoordinator: ObservableObject {
             return
         }
         let session = sessionId
-        let masked = NurseCopy.maskedStudyID(flow.participantCode ?? "")
+        let masked = repeatRequest?.maskedCode ?? NurseCopy.maskedStudyID(flow.participantCode ?? "")
         let captured = capturedAt ?? Date()
         let repeating = repeatRequest != nil
         let seconds = r.duration
-        Task { [weak self] in
+        let interruptedAt = Date()
+        // Round 2 (I2): tracked like `acceptedSealing`: a hand-off started meanwhile awaits it and carries the clip.
+        let task = Task<InterruptedClip?, Never> {
             let arts = await sealing.value
-            let clip = InterruptedClip(step: step, attempt: attempt, recordedSeconds: seconds, interruptedAt: Date(),
-                                       artefacts: arts)
-            guard let self, !repeating, self.sessionId == session, !self.handedOff else {
-                // A repeat (R-3: no checkpoint of the original session), or the session already moved on:
-                // keep the clip in the session's held record (or a clip-only record).
+            return arts.isEmpty ? nil : InterruptedClip(step: step, attempt: attempt, recordedSeconds: seconds,
+                                                        interruptedAt: interruptedAt, artefacts: arts)
+        }
+        clipSealing.append(task)
+        Task { [weak self] in
+            guard let clip = await task.value else { return }
+            guard let self else {
                 storage.keepInterruptedClip(clip, sessionId: session, maskedCode: masked, capturedAt: captured)
                 return
             }
+            if repeating {
+                // A repeat: kept in the session's held record (or a clip-only record), never in a hand-off.
+                storage.keepInterruptedClip(clip, sessionId: session, maskedCode: masked, capturedAt: captured)
+                return
+            }
+            // Handed off meanwhile: that hand-off awaited this task and carries the clip.
+            guard self.sessionId == session, !self.handedOff else { return }
             self.interruptedClips.append(clip)
             self.checkpointForReauth()
         }
@@ -330,9 +354,9 @@ final class FlowCoordinator: ObservableObject {
     func reset() {
         if let rec = currentRecording { currentRecording = nil; camera.cancel(rec) }
         authStopping = nil
-        camera.stop()
-        if !flow.attemptLog.isEmpty || !interruptedClips.isEmpty { handOff() }
-        acceptedSealing = []; sealedSoFar = []; faceSummary = nil; interruptedClips = []
+        camera.stop(owner: cameraOwner)
+        if !flow.attemptLog.isEmpty || !interruptedClips.isEmpty || !clipSealing.isEmpty { handOff() }
+        acceptedSealing = []; sealedSoFar = []; faceSummary = nil; interruptedClips = []; clipSealing = []
         acceptedFaceMetadata = nil; lastMetadata = nil; handedOff = false
         sessionId = UUID(); patientId = nil; offline = false; capturedAt = nil; cameraMessage = nil
         flow.reset(); experimental = nil; showOutbox = false; refresh()
@@ -370,10 +394,12 @@ final class FlowCoordinator: ObservableObject {
         currentRecording = rec
         refresh()
         let camera = self.camera
+        let owner = cameraOwner
         let positioning = step == .neutralFace ? nil : faceSummary
         Task { [weak self] in
             do {
-                let result = try await camera.record(rec, seconds: cfg.targetSeconds, positioning: positioning) { elapsed in
+                let result = try await camera.record(rec, owner: owner, seconds: cfg.targetSeconds,
+                                                     positioning: positioning) { elapsed in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentRecording === rec else { return }
                         self.recordingTick(elapsed: elapsed)
@@ -445,7 +471,10 @@ final class FlowCoordinator: ObservableObject {
                 self.sealedSoFar += arts
                 // R-3: a server-requested repeat never checkpoints a standalone hand-off of the original session
                 // (no patient id: it would be held as HANDOFF_PATIENT_UNKNOWN). It ends in enqueueRecapture.
-                guard self.repeatRequest == nil else { return }
+                guard self.repeatRequest == nil else {
+                    if self.flow.authPending { self.checkpointForReauth() }   // round 2 (I4): repeat-pending record
+                    return
+                }
                 CaptureStorage.shared?.checkpoint(self.pending(artefacts: self.sealedSoFar))
             }
         } else {
@@ -480,12 +509,19 @@ final class FlowCoordinator: ObservableObject {
         if repeatRequest != nil { handOffRepeat(); return }
         guard handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
         handedOff = true
-        camera.stop()
+        camera.stop(owner: cameraOwner)
         let tasks = acceptedSealing
+        let clipTasks = clipSealing
         let base = pending(artefacts: [])
         Task.detached {
             var p = base
             for t in tasks { p.artefacts += await t.value }
+            // Round 2 (I2): clips still sealing at hand-off time are carried too (union by sealed key id).
+            for t in clipTasks {
+                guard let c = await t.value else { continue }
+                let have = Set(p.interruptedClips.flatMap { $0.artefacts.map { $0.sealed.keyId } })
+                if !c.artefacts.contains(where: { have.contains($0.sealed.keyId) }) { p.interruptedClips.append(c) }
+            }
             storage.submit(p)
         }
     }
@@ -499,7 +535,7 @@ final class FlowCoordinator: ObservableObject {
     private func handOffRepeat() {
         guard let r = repeatRequest, handoffEnabled, !handedOff, let storage = CaptureStorage.shared else { return }
         handedOff = true
-        camera.stop()
+        camera.stop(owner: cameraOwner)
         let tasks = acceptedSealing
         let accepted = flow.attemptLog.filter { $0.verdict == .accept }.map { $0.step }
         Task.detached {

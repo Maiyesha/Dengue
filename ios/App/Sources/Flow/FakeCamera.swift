@@ -23,13 +23,15 @@ protocol CaptureCameraProviding: AnyObject {
     /// I1 positioning: preview running with auto exposure / white balance / focus. For the face step the camera
     /// evaluates Vision + TrueDepth + lux into `Guidance` cues (~5 Hz) and calls `onGuidance(cues, monotonicSeconds)`
     /// on any queue. Idempotent per step; replaced by the next call; ended by `record` or `stop`.
-    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void)
+    /// Round 2 (I1): `owner` (the coordinator) claims the shared camera.
+    func startPositioning(step: CaptureStep, owner: UUID, onGuidance: @escaping ([GuidanceCue], Double) -> Void)
     /// Session for `AVCaptureVideoPreviewLayer` (nil for the UI-test fake).
     var previewSession: AVCaptureSession? { get }
     /// Records the step for `seconds` under `rec`'s token. `positioning` is the face step's summary, reused by
     /// the fingertip step's metadata. `onTick` fires about once per second (any queue).
     /// Throws if cancelled (pause / interruption) or the camera is not ready; the partial file is then deleted.
-    func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
+    /// Round 2 (I1): `owner` (the coordinator) claims the shared camera.
+    func record(_ rec: RecordingSession, owner: UUID, seconds: Double, positioning: PositioningSummary?,
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording
     /// Discards the partial recording of exactly this attempt.
     func cancel(_ rec: RecordingSession)
@@ -37,8 +39,9 @@ protocol CaptureCameraProviding: AnyObject {
     /// asset writer is finished and the torch turned off, and `record` returns the shorter `StepRecording` (with
     /// its sealing). If nothing was recorded yet, `record` throws as for `cancel`.
     func finishEarly(_ rec: RecordingSession)
-    /// Stops the camera (and torch) between sessions.
-    func stop()
+    /// Stops the camera (and torch) between sessions. Round 2 (I1): token-scoped like `cancel`: acts only when
+    /// `owner` owns the camera (core `CameraOwnership`), so one flow never stops another flow's recording.
+    func stop(owner: UUID)
 }
 
 /// Used when UITEST_FAKE_CAMERA=1: emits a synthetic plausible trace instantly, no video, nothing sealed.
@@ -46,14 +49,14 @@ final class FakeCamera: CaptureCameraProviding {
     var previewSession: AVCaptureSession? { nil }
 
     /// Face step: reports `[.ready]` for 2 s straight away so the positioning gate opens in UI tests.
-    func startPositioning(step: CaptureStep, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
+    func startPositioning(step: CaptureStep, owner: UUID, onGuidance: @escaping ([GuidanceCue], Double) -> Void) {
         guard step == .neutralFace else { return }
         let t = ProcessInfo.processInfo.systemUptime
         onGuidance([.ready], t)
         onGuidance([.ready], t + CaptureFlow.positioningHoldSeconds)
     }
 
-    func record(_ rec: RecordingSession, seconds: Double, positioning: PositioningSummary?,
+    func record(_ rec: RecordingSession, owner: UUID, seconds: Double, positioning: PositioningSummary?,
                 onTick: @escaping (Double) -> Void) async throws -> StepRecording {
         let fps = 30.0
         let base: (r: Double, g: Double, b: Double) = rec.step == .fingertipPPG ? (200, 40, 30) : (120, 150, 90)
@@ -94,5 +97,5 @@ final class FakeCamera: CaptureCameraProviding {
     func cancel(_ rec: RecordingSession) { rec.finish() }
     /// The fake records synchronously: there is never a live attempt to end early.
     func finishEarly(_ rec: RecordingSession) {}
-    func stop() {}
+    func stop(owner: UUID) {}
 }
