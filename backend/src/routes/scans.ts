@@ -37,6 +37,10 @@ const CaptureStep = z.enum(['neutral_face', 'fingertip_ppg', 'ocular_capture', '
 type CaptureStepT = z.infer<typeof CaptureStep>;
 const ReasonCode = z.string().min(1).max(64);
 
+/** True iff the capture met the positioning guidance (distance 20-80 cm, |angle| <= 15 deg, lux >= 200). */
+export const metadataInSpec = (m: { distance_cm: number; angle_deg: number; lighting_lux: number }): boolean =>
+  m.distance_cm >= 20 && m.distance_cm <= 80 && Math.abs(m.angle_deg) <= 15 && m.lighting_lux >= 200;
+
 /** doc 03 ContextualMetadata + capture-rig fields. */
 const CaptureMetadata = z
   .object({
@@ -44,9 +48,10 @@ const CaptureMetadata = z
     frame_rate: z.number().min(20).max(240),
     resolution: z.string().regex(/^[0-9]+x[0-9]+$/),
     exposure: z.number(),
-    distance_cm: z.number().min(20).max(80),
-    angle_deg: z.number().min(-15).max(15),
-    lighting_lux: z.number().min(200),
+    // Physical sanity only (T13 ruling): out-of-guidance values are research metadata, flagged via metadata_in_spec.
+    distance_cm: z.number().min(5).max(300),
+    angle_deg: z.number().min(-90).max(90),
+    lighting_lux: z.number().min(0),
     ambient_temp_c: z.number().optional(),
     ambient_humidity_pct: z.number().min(0).max(100).optional(),
     mount: z.enum(['handheld', 'holder']),
@@ -235,7 +240,7 @@ export async function scanRoutes(app: FastifyInstance): Promise<void> {
             b.captured_at,
             b.offline,
             b.protocol_version,
-            JSON.stringify({ ...b.metadata, capture_steps: b.capture_steps }),
+            JSON.stringify({ ...b.metadata, metadata_in_spec: metadataInSpec(b.metadata), capture_steps: b.capture_steps }),
           ],
         );
         const scan = ins.rows[0];

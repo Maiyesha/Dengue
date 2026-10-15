@@ -1759,8 +1759,8 @@
                         "type": "number"
                       },
                       "angle_deg": {
-                        "maximum": 15,
-                        "minimum": -15,
+                        "maximum": 90,
+                        "minimum": -90,
                         "type": "number"
                       },
                       "camera_model": {
@@ -1769,8 +1769,8 @@
                         "type": "string"
                       },
                       "distance_cm": {
-                        "maximum": 80,
-                        "minimum": 20,
+                        "maximum": 300,
+                        "minimum": 5,
                         "type": "number"
                       },
                       "exposure": {
@@ -1786,7 +1786,7 @@
                         "type": "number"
                       },
                       "lighting_lux": {
-                        "minimum": 200,
+                        "minimum": 0,
                         "type": "number"
                       },
                       "lighting_type": {

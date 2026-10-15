@@ -158,6 +158,43 @@ describe('POST /v1/scans', () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it('metadata ranges are physical sanity only; server stores metadata_in_spec (T13 ruling)', async () => {
+    const inSpec = await post('/v1/scans', scanBody({ captured_at: at(7000) }));
+    expect(inSpec.statusCode).toBe(201);
+    const row1 = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [inSpec.json().scan.id])).rows[0];
+    expect(row1.metadata.metadata_in_spec).toBe(true);
+
+    const out = await post(
+      '/v1/scans',
+      scanBody({ captured_at: at(8000), metadata: { ...metadata, distance_cm: 100, angle_deg: -30, lighting_lux: 50 } }),
+    );
+    expect(out.statusCode).toBe(201);
+    const row2 = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [out.json().scan.id])).rows[0];
+    expect(row2.metadata).toMatchObject({ distance_cm: 100, angle_deg: -30, lighting_lux: 50, metadata_in_spec: false });
+
+    for (const [i, bad] of [{ distance_cm: 4 }, { distance_cm: 301 }, { angle_deg: 91 }, { angle_deg: -91 },
+      { lighting_lux: -1 }, { metadata_in_spec: true }].entries()) {
+      const r = await post('/v1/scans', scanBody({ captured_at: at(9000 + i * 100), metadata: { ...metadata, ...bad } }));
+      expect(r.statusCode, JSON.stringify(bad)).toBe(400);
+    }
+  });
+
+  it('metadata_in_spec boundaries: 20/80 cm, |15| deg, 200 lx are in spec', async () => {
+    const edge = await post(
+      '/v1/scans',
+      scanBody({ captured_at: at(10000), metadata: { ...metadata, distance_cm: 80, angle_deg: -15, lighting_lux: 200 } }),
+    );
+    expect(edge.statusCode).toBe(201);
+    const row = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [edge.json().scan.id])).rows[0];
+    expect(row.metadata.metadata_in_spec).toBe(true);
+    const below = await post(
+      '/v1/scans',
+      scanBody({ captured_at: at(11000), metadata: { ...metadata, distance_cm: 19.9 } }),
+    );
+    const row2 = (await pool.query('SELECT metadata FROM scans WHERE id = $1', [below.json().scan.id])).rows[0];
+    expect(row2.metadata.metadata_in_spec).toBe(false);
+  });
+
   it('same client_session_id returns 200 same id', async () => {
     const b = scanBody({ patient_id: P_OK2, captured_at: at(0) });
     const first = await post('/v1/scans', b);
