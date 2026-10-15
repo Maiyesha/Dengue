@@ -119,3 +119,10 @@ export async function buildTestApp(
 }
 
 export const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+/** C1: every artefact declare carries the DEK wrapped for the server KMS (dummy 384-byte RSA-3072 ciphertext). */
+export const WRAPPED = {
+  wrapped_key: Buffer.alloc(384, 7).toString('base64'),
+  key_alg: 'RSA-OAEP-256',
+  kms_key_id: 'kms-test-key',
+} as const;

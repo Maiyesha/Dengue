@@ -397,8 +397,8 @@ describe('12. cross-site child tables and research row gate', () => {
                         VALUES ($1,'u',now(),'hr',80,'ox')`, [PATIENT_B]);
       await asSuper(c, `INSERT INTO features(scan_id,domain,name,value,pipeline_version,feature_availability_timestamp)
                         VALUES ($1,'rppg_face','hr_bpm',72,'pv1',now())`, [SCAN_B]);
-      await asSuper(c, `INSERT INTO artefacts(scan_id,step,attempt,kind,sha256,object_key)
-                        VALUES ($1,'neutral_face',1,'video',repeat('a',64),'h-obj-b')`, [SCAN_B]);
+      await asSuper(c, `INSERT INTO artefacts(scan_id,step,attempt,kind,sha256,object_key,wrapped_key,key_alg,kms_key_id)
+                        VALUES ($1,'neutral_face',1,'video',repeat('a',64),'h-obj-b','w','RSA-OAEP-256','k')`, [SCAN_B]);
       await asSuper(c, `INSERT INTO sqi_checks(scan_id,step,attempt,check_id,source,passed)
                         VALUES ($1,'neutral_face',1,'face_detection','device',true)`, [SCAN_B]);
       await asSuper(c, `INSERT INTO scan_reviews(scan_id,reviewer_user_id,action,webauthn_assertion_hash)

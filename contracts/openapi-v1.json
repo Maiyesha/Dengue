@@ -2292,12 +2292,24 @@
                     ],
                     "type": "string"
                   },
+                  "key_alg": {
+                    "enum": [
+                      "RSA-OAEP-256"
+                    ],
+                    "type": "string"
+                  },
                   "kind": {
                     "enum": [
                       "video",
                       "roi_trace",
                       "metadata"
                     ],
+                    "type": "string"
+                  },
+                  "kms_key_id": {
+                    "description": "Server KMS key the data key was wrapped for",
+                    "maxLength": 256,
+                    "minLength": 1,
                     "type": "string"
                   },
                   "sha256": {
@@ -2317,6 +2329,13 @@
                       "dorsal_tongue"
                     ],
                     "type": "string"
+                  },
+                  "wrapped_key": {
+                    "description": "base64 RSA-OAEP-SHA256 ciphertext of the 32-byte artefact data key (RSA 3072-4096 bit)",
+                    "maxLength": 684,
+                    "minLength": 512,
+                    "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -2324,7 +2343,10 @@
                   "attempt",
                   "kind",
                   "size_bytes",
-                  "sha256"
+                  "sha256",
+                  "wrapped_key",
+                  "key_alg",
+                  "kms_key_id"
                 ],
                 "type": "object"
               }

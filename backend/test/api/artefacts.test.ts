@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A, CONSENT_VERSION } from '../fixtures';
-import { buildTestApp, tokenFor, deviceTokenFor, bearer, type TestApp } from './helpers';
+import { buildTestApp, tokenFor, deviceTokenFor, bearer, WRAPPED, type TestApp } from './helpers';
 
 const pool = getTestPool();
 let ta: TestApp;
@@ -46,7 +46,7 @@ const post = async (url: string, body?: unknown, o: { token?: string; key?: stri
   });
 
 const declare = (scan: string, step: string, kind: string, content: string, attempt = 1, token?: string) =>
-  post(`/v1/scans/${scan}/artefacts`, { step, attempt, kind, size_bytes: 10, sha256: sha(content) }, { token });
+  post(`/v1/scans/${scan}/artefacts`, { step, attempt, kind, size_bytes: 10, sha256: sha(content), ...WRAPPED }, { token });
 
 const keyOf = (scan: string, step: string, kind: string, attempt = 1) =>
   `captures/${SITE_A}/${scan}/${step}/${attempt}/${kind}`;
@@ -371,9 +371,37 @@ describe('artefact uploads', () => {
 
   it('rejects unknown fields and bad sha256 -> 400', async () => {
     const scan = await mkScan();
-    const base = { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('a') };
+    const base = { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('a'), ...WRAPPED };
     expect((await post(`/v1/scans/${scan}/artefacts`, { ...base, extra: 1 })).statusCode).toBe(400);
     expect((await post(`/v1/scans/${scan}/artefacts`, { ...base, sha256: 'abc' })).statusCode).toBe(400);
+  });
+
+  it('C1: declare requires and stores wrapped_key, key_alg (RSA-OAEP-256 only) and kms_key_id', async () => {
+    const scan = await mkScan();
+    const base = { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('w'), ...WRAPPED };
+    for (const k of ['wrapped_key', 'key_alg', 'kms_key_id'] as const) {
+      const { [k]: _omit, ...rest } = base;
+      const r = await post(`/v1/scans/${scan}/artefacts`, rest);
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error.code).toBe('DS_VALIDATION_001');
+    }
+    for (const bad of [{ key_alg: 'RSA-OAEP' }, { wrapped_key: 'not base64!' }, { wrapped_key: Buffer.alloc(256, 1).toString('base64') },
+      { kms_key_id: '' }]) {
+      expect((await post(`/v1/scans/${scan}/artefacts`, { ...base, ...bad })).statusCode).toBe(400);
+    }
+    const ok = await post(`/v1/scans/${scan}/artefacts`, base);
+    expect(ok.statusCode).toBe(201);
+    const row = (await pool.query('SELECT wrapped_key, key_alg, kms_key_id FROM artefacts WHERE id = $1', [ok.json().artefact_id])).rows[0];
+    expect(row).toEqual({ wrapped_key: WRAPPED.wrapped_key, key_alg: 'RSA-OAEP-256', kms_key_id: 'kms-test-key' });
+  });
+
+  it('C1: the database refuses another key_alg or a missing wrapped key', async () => {
+    const scan = await mkScan();
+    const ins = (alg: string | null, wk: string | null) => pool.query(
+      `INSERT INTO artefacts(scan_id,step,attempt,kind,sha256,object_key,wrapped_key,key_alg,kms_key_id)
+       VALUES ($1,'neutral_face',1,'video',$2,$3,$4,$5,'k')`, [scan, sha('db'), `k-${randomUUID()}`, wk, alg]);
+    await expect(ins('RSA-OAEP', 'x')).rejects.toThrow();
+    await expect(ins('RSA-OAEP-256', null)).rejects.toThrow();
   });
 });
 
@@ -473,7 +501,7 @@ describe('scan lifecycle (F9)', () => {
 
   it('(a) declare takes an optional device_verdict for a new attempt; attempt must be 1..3', async () => {
     const scan = await mkScan('capture_pending', []);
-    const body = (o: Record<string, unknown>) => ({ step: 'fingertip_ppg', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('u'), ...o });
+    const body = (o: Record<string, unknown>) => ({ step: 'fingertip_ppg', attempt: 1, kind: 'video', size_bytes: 10, sha256: sha('u'), ...WRAPPED, ...o });
     const r = await post(`/v1/scans/${scan}/artefacts`, body({ device_verdict: 'UNABLE_TO_ACQUIRE' }));
     expect(r.statusCode).toBe(201);
     expect(await attempts(scan)).toEqual([{ step: 'fingertip_ppg', attempt: 1, device_verdict: 'UNABLE_TO_ACQUIRE' }]);

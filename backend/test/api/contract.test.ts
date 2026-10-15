@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, PATIENT_A } from '../fixtures';
-import { buildTestApp, tokenFor, bearer, type TestApp } from './helpers';
+import { buildTestApp, tokenFor, bearer, WRAPPED, type TestApp } from './helpers';
 import { R, ROUTE_DOCS } from '../../src/openapi';
 import { allDocumentedSuccesses, contractCovered, expectContract } from './contract';
 
@@ -137,7 +137,7 @@ describe('response contracts (happy paths)', () => {
   it('artefacts: declare (201, 200), part url, complete -> quality_pending', async () => {
     for (const step of ['neutral_face', 'fingertip_ppg']) {
       for (const kind of ['video', 'roi_trace']) {
-        const body = { step, attempt: 1, kind, size_bytes: 10, sha256: sha(`${step}-${kind}`) };
+        const body = { step, attempt: 1, kind, size_bytes: 10, sha256: sha(`${step}-${kind}`), ...WRAPPED };
         const d = expectContract(await post(`/v1/scans/${scanId}/artefacts`, body, deviceToken), 'POST', '/v1/scans/{id}/artefacts');
         expect(d.statusCode).toBe(201);
         expect(expectContract(await post(`/v1/scans/${scanId}/artefacts`, body, deviceToken), 'POST', '/v1/scans/{id}/artefacts')

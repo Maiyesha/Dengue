@@ -24,6 +24,8 @@
 // capture_rejected_post_hoc audit row. The function also supplies the patient pseudonym used for
 // every audit row of these routes (a device token cannot read patients).
 // device_id (F1): the first declare made with a device token sets scans.device_id (if NULL).
+// Envelope encryption (C1): declare carries wrapped_key / key_alg ('RSA-OAEP-256') / kms_key_id, stored on the
+// artefact (re-declare after a rejection replaces them). src/crypto opens the DSv1 object with the unwrapped key.
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -51,6 +53,15 @@ const DeclareBody = z
       .enum(['ACCEPT', 'RECAPTURE', 'UNABLE_TO_ACQUIRE'])
       .default('ACCEPT')
       .describe('Used only when this declare creates the step attempt (pre-registered scans); ignored otherwise'),
+    // C1 envelope encryption: the artefact's AES-256 data key wrapped with the server KMS RSA (>= 3072-bit) key.
+    wrapped_key: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/)
+      .min(512)
+      .max(684)
+      .describe('base64 RSA-OAEP-SHA256 ciphertext of the 32-byte artefact data key (RSA 3072-4096 bit)'),
+    key_alg: z.literal('RSA-OAEP-256'),
+    kms_key_id: z.string().min(1).max(256).describe('Server KMS key the data key was wrapped for'),
   })
   .strict();
 
@@ -175,8 +186,10 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
           assertAcceptsArtefacts(s.status);
           const uploadId = await app.deps.objectStore.createMultipart(existing.object_key);
           await c.query(
-            `UPDATE artefacts SET upload_id = $2, size_bytes = $3, status = 'declared' WHERE id = $1 AND status = 'rejected'`,
-            [existing.id, uploadId, b.size_bytes],
+            `UPDATE artefacts SET upload_id = $2, size_bytes = $3, status = 'declared',
+                    wrapped_key = $4, key_alg = $5, kms_key_id = $6
+              WHERE id = $1 AND status = 'rejected'`,
+            [existing.id, uploadId, b.size_bytes, b.wrapped_key, b.key_alg, b.kms_key_id],
           );
           await audit(c, {
             eventType: auditEvent(actor),
@@ -214,9 +227,10 @@ export async function artefactRoutes(app: FastifyInstance): Promise<void> {
         const key = `captures/${s.site_id}/${s.id}/${b.step}/${b.attempt}/${b.kind}`;
         const uploadId = await app.deps.objectStore.createMultipart(key);
         const ins = await c.query<{ id: string }>(
-          `INSERT INTO artefacts (scan_id, step, attempt, kind, size_bytes, sha256, object_key, upload_id, status)
-           VALUES ($1, $2::capture_step, $3, $4, $5, $6, $7, $8, 'declared') RETURNING id`,
-          [s.id, b.step, b.attempt, b.kind, b.size_bytes, sha, key, uploadId],
+          `INSERT INTO artefacts (scan_id, step, attempt, kind, size_bytes, sha256, object_key, upload_id, status,
+                                  wrapped_key, key_alg, kms_key_id)
+           VALUES ($1, $2::capture_step, $3, $4, $5, $6, $7, $8, 'declared', $9, $10, $11) RETURNING id`,
+          [s.id, b.step, b.attempt, b.kind, b.size_bytes, sha, key, uploadId, b.wrapped_key, b.key_alg, b.kms_key_id],
         );
         const id = ins.rows[0].id;
         await audit(c, {

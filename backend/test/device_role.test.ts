@@ -33,8 +33,8 @@ const statusOf = async (c: pg.PoolClient, id: string) =>
   (await asSuper(c, 'SELECT status FROM scans WHERE id=$1', [id])).rows[0].status as string;
 
 const insArtefact = (c: pg.PoolClient, scanId: string, key: string) =>
-  c.query(`INSERT INTO artefacts(scan_id, step, attempt, kind, sha256, object_key)
-           VALUES ($1,'neutral_face',1,'video',repeat('a',64),$2)`, [scanId, key]);
+  c.query(`INSERT INTO artefacts(scan_id,step,attempt,kind,sha256,object_key,wrapped_key,key_alg,kms_key_id)
+           VALUES ($1,'neutral_face',1,'video',repeat('a',64),$2,'w','RSA-OAEP-256','k')`, [scanId, key]);
 
 describe('device role: scans', () => {
   it('sees only its own site scans; no site → none', async () => {
@@ -114,8 +114,8 @@ describe('device role: artefacts', () => {
 
   it('cannot see or update another site artefacts', async () => {
     await asDevice(async (c) => {
-      await asSuper(c, `INSERT INTO artefacts(scan_id, step, attempt, kind, sha256, object_key)
-                        VALUES ($1,'neutral_face',1,'video',repeat('b',64),'dev-other-2')`, [SCAN_B]);
+      await asSuper(c, `INSERT INTO artefacts(scan_id,step,attempt,kind,sha256,object_key,wrapped_key,key_alg,kms_key_id)
+                        VALUES ($1,'neutral_face',1,'video',repeat('b',64),'dev-other-2','w','RSA-OAEP-256','k')`, [SCAN_B]);
       expect((await c.query(`SELECT 1 FROM artefacts WHERE object_key='dev-other-2'`)).rowCount).toBe(0);
       expect((await c.query(`UPDATE artefacts SET status='rejected' WHERE object_key='dev-other-2'`)).rowCount).toBe(0);
     });

@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { getTestPool } from '../pg';
 import { seedFixtures, clearFixtures, SITE_A, SITE_B, PATIENT_A, SCAN_A } from '../fixtures';
-import { buildTestApp, tokenFor, deviceTokenFor, bearer, type TestFakes } from './helpers';
+import { buildTestApp, tokenFor, deviceTokenFor, bearer, WRAPPED, type TestFakes } from './helpers';
 import { canonicalJson } from '../../src/routes/review';
 import { sha256Hex } from '../../src/audit';
 
@@ -161,7 +161,7 @@ describe('POST /v1/scans/:id/review', () => {
       method: 'POST',
       url: `/v1/scans/${SCAN_A}/artefacts`,
       headers: { ...bearer(await deviceTokenFor(dev, SITE_A)), 'idempotency-key': randomUUID() },
-      payload: { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: 'a'.repeat(64) },
+      payload: { step: 'neutral_face', attempt: 1, kind: 'video', size_bytes: 10, sha256: 'a'.repeat(64), ...WRAPPED },
     });
     expect(d.statusCode).toBe(201);
     await setStatus(SCAN_A, 'review_pending');
