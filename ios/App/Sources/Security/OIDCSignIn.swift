@@ -29,7 +29,7 @@ public struct OIDCTokens: Codable, Equatable {
     public var idToken: String?
 }
 
-public enum OIDCError: Error { case notConfigured, cancelled, badCallback, state, tokenExchange(Int), keychain(OSStatus) }
+public enum OIDCError: Error { case notConfigured, cancelled, badCallback, state, tokenExchange(Int), keychain(OSStatus), cannotStart }
 
 /// OIDC authorisation-code + PKCE (S256) via ASWebAuthenticationSession. Tokens live in the Keychain with
 /// `AfterFirstUnlockThisDeviceOnly`. Idle / offline timing is decided by core `SessionPolicy`; this class
@@ -79,7 +79,10 @@ public final class OIDCSignIn: NSObject, ASWebAuthenticationPresentationContextP
             s.presentationContextProvider = self
             s.prefersEphemeralWebBrowserSession = true
             web = s
-            s.start()
+            if !s.start() {   // presentation failed: the completion handler will never run
+                web = nil
+                cont.resume(throwing: OIDCError.cannotStart)
+            }
         }
         let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
         guard items.first(where: { $0.name == "state" })?.value == state else { throw OIDCError.state }

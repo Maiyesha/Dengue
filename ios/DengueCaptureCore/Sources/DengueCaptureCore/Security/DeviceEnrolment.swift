@@ -12,6 +12,16 @@ public protocol AppAttestProviding {
 public enum DeviceEnrolmentError: Error, Equatable {
     case attestationUnsupported
     case invalidChallenge
+    /// Renewal was refused repeatedly (not a revoked device): surface to the user / support.
+    case renewalRejected
+}
+
+/// What survives a failed enrolment after attest succeeded. Persist it so the assert can be retried
+/// without a second attest (a key can be attested only once).
+public struct EnrolmentProgress: Equatable, Codable {
+    public let keyId: String
+    public let deviceId: UUID
+    public init(keyId: String, deviceId: UUID) { self.keyId = keyId; self.deviceId = deviceId }
 }
 
 public struct DeviceCredential: Equatable {
@@ -37,18 +47,30 @@ public final class DeviceEnrolment {
         self.api = api; self.attest = attest; self.clock = clock
     }
 
-    public func enrol(wardId: String) async throws -> DeviceCredential {
+    /// The server consumes a challenge on attest, so the assertion needs a second one.
+    /// `persist` is called after attest succeeds; pass the saved value as `resume` to retry only the assert.
+    public func enrol(wardId: String, resume: EnrolmentProgress? = nil,
+                      persist: (EnrolmentProgress) -> Void = { _ in }) async throws -> DeviceCredential {
         guard attest.isSupported else { throw DeviceEnrolmentError.attestationUnsupported }
+        let progress: EnrolmentProgress
+        if let resume {
+            progress = resume
+        } else {
+            let c1 = try await api.deviceChallenge(idempotencyKey: UUID().uuidString).challenge
+            let h1 = try Self.clientDataHash(c1)
+            let keyId = try await attest.generateKey()
+            let attestation = try await attest.attestKey(keyId, clientDataHash: h1)
+            let device = try await api.attest(keyId: keyId, attestation: attestation.base64EncodedString(),
+                                              challenge: c1, wardId: wardId, idempotencyKey: UUID().uuidString)
+            progress = EnrolmentProgress(keyId: keyId, deviceId: device.deviceId)
+            persist(progress)
+        }
         let challenge = try await api.deviceChallenge(idempotencyKey: UUID().uuidString).challenge
         let hash = try Self.clientDataHash(challenge)
-        let keyId = try await attest.generateKey()
-        let attestation = try await attest.attestKey(keyId, clientDataHash: hash)
-        let device = try await api.attest(keyId: keyId, attestation: attestation.base64EncodedString(),
-                                          challenge: challenge, wardId: wardId, idempotencyKey: UUID().uuidString)
-        let assertion = try await attest.generateAssertion(keyId, clientDataHash: hash)
-        let tok = try await api.assert(deviceId: device.deviceId, assertion: assertion.base64EncodedString(),
+        let assertion = try await attest.generateAssertion(progress.keyId, clientDataHash: hash)
+        let tok = try await api.assert(deviceId: progress.deviceId, assertion: assertion.base64EncodedString(),
                                        challenge: challenge, asUser: true)
-        return DeviceCredential(deviceId: device.deviceId, keyId: keyId, deviceToken: tok.deviceToken,
+        return DeviceCredential(deviceId: progress.deviceId, keyId: progress.keyId, deviceToken: tok.deviceToken,
                                 state: DeviceTokenState(issuedAt: clock.wallNow, expiresIn: TimeInterval(tok.expiresIn)))
     }
 
@@ -73,8 +95,13 @@ public final class DeviceEnrolment {
             return r
         } catch let e as APIError {
             switch e {
-            case .reEnrol, .unauthorized: state.recordFailure(.reEnrol, at: now)
-            default: state.recordFailure(.retryable, at: now)
+            case .reEnrol, .invalid(code: "DS_NOT_FOUND"):   // DS_DEVICE_001, or revoked/unknown device (404)
+                state.recordFailure(.reEnrol, at: now)
+            case .unauthorized:   // DS_DEVICE_002/003/004: retry with backoff, then surface
+                state.recordFailure(.unauthorized, at: now)
+                if state.renewalRejected { throw DeviceEnrolmentError.renewalRejected }
+            default:
+                state.recordFailure(.retryable, at: now)
             }
             return nil
         } catch {

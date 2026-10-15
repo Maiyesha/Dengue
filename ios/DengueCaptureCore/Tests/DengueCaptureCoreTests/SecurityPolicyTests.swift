@@ -5,11 +5,18 @@ import Crypto
 final class FakeClock: OutboxClock {
     var wallNow: Date
     var monotonicNanos: UInt64 = 1_000_000_000
+    var continuousNanos: UInt64 = 5_000_000_000
     var serverOffset: TimeInterval = 0
     init(wall: Date = Date(timeIntervalSince1970: 1_800_000_000)) { wallNow = wall }
     func advance(_ s: TimeInterval) {
         wallNow = wallNow.addingTimeInterval(s)
         monotonicNanos += UInt64(s * 1_000_000_000)
+        continuousNanos += UInt64(s * 1_000_000_000)
+    }
+    /// Device asleep: continuous and wall time move, uptime does not.
+    func sleep(_ s: TimeInterval) {
+        wallNow = wallNow.addingTimeInterval(s)
+        continuousNanos += UInt64(s * 1_000_000_000)
     }
 }
 
@@ -68,6 +75,35 @@ final class SessionPolicyTests: XCTestCase {
         XCTAssertEqual(p.evaluate(), .expired)
     }
 
+    func testIdleCountsTimeAsleep() {
+        let c = FakeClock()
+        let p = SessionPolicy(clock: c)
+        p.signedIn()
+        c.sleep(11 * 60)   // uptime did not move
+        XCTAssertEqual(p.evaluate(), .reauthRequired)
+    }
+
+    func testWallClockSetBackDoesNotExtendOfflineLimit() {
+        let c = FakeClock()
+        let p = SessionPolicy(clock: c)
+        p.signedIn()
+        stay(c, p, 11 * 3600)
+        // wall clock set back 5 h while continuous time keeps running
+        c.wallNow = c.wallNow.addingTimeInterval(-5 * 3600)
+        c.continuousNanos += UInt64(2 * 3600 * 1e9)
+        c.wallNow = c.wallNow.addingTimeInterval(2 * 3600)
+        XCTAssertEqual(p.evaluate(), .expired)   // 13 h by continuous; wall alone would say 8 h
+    }
+
+    func testContinuousClockBackwardsMeansRebootFailsClosed() {
+        let c = FakeClock()
+        let p = SessionPolicy(clock: c)
+        p.signedIn()
+        c.advance(60)
+        c.continuousNanos = 1_000   // reboot
+        XCTAssertEqual(p.evaluate(), .expired)
+    }
+
     func testNotSignedInIsExpired() {
         XCTAssertEqual(SessionPolicy(clock: FakeClock()).evaluate(), .expired)
     }
@@ -104,6 +140,17 @@ final class DeviceTokenStateTests: XCTestCase {
         s.recordFailure(.reEnrol, at: t0)
         XCTAssertTrue(s.reEnrolRequired)
         XCTAssertFalse(s.canAttemptRenewal(at: t0.addingTimeInterval(99999)))
+    }
+
+    func testUnauthorizedRetriesFiveTimesThenRejected() {
+        var s = DeviceTokenState(issuedAt: t0, expiresIn: 86400)
+        let now = t0.addingTimeInterval(21 * 3600)
+        for _ in 0..<4 { s.recordFailure(.unauthorized, at: now) }
+        XCTAssertFalse(s.renewalRejected)
+        XCTAssertFalse(s.reEnrolRequired)
+        s.recordFailure(.unauthorized, at: now)
+        XCTAssertTrue(s.renewalRejected)
+        XCTAssertFalse(s.canAttemptRenewal(at: now.addingTimeInterval(99999)))
     }
 
     func testRateLimitBacksOffExponentially() {
@@ -146,21 +193,38 @@ final class FakeEnrolAPI: DengueAPI {
     var renewalError: Error?
     var assertCalls: [(UUID, String, String, Bool)] = []
     let deviceId = UUID()
+    var issued = 0
+    var used = Set<String>()
+    var assertFailuresLeft = 0
+    var renewalNotFound = false
+    var forcedChallenge: String?
+    func fresh() -> String {
+        issued += 1
+        if let f = forcedChallenge { return f }
+        return Data((0..<32).map { UInt8(($0 + issued * 7) % 256) }).base64EncodedString()
+    }
     func deviceChallenge(idempotencyKey: String) async throws -> DeviceChallengeResponse {
-        log.append("deviceChallenge"); return try decode("{\"challenge\":\"\(challenge)\"}")
+        log.append("deviceChallenge")
+        challenge = fresh()
+        return try decode("{\"challenge\":\"\(challenge)\"}")
     }
     func attest(keyId: String, attestation: String, challenge: String, wardId: String, idempotencyKey: String) async throws -> AttestResponse {
         log.append("attest:\(keyId):\(attestation):\(wardId)")
+        if !used.insert(challenge).inserted { throw APIError.unauthorized }   // server consumes the challenge
         return try decode("{\"device_id\":\"\(deviceId.uuidString)\"}")
     }
     func assert(deviceId: UUID, assertion: String, challenge: String, asUser: Bool) async throws -> AssertResponse {
         log.append("assert"); assertCalls.append((deviceId, assertion, challenge, asUser))
+        if !used.insert(challenge).inserted { throw APIError.unauthorized }   // DS_DEVICE_003
+        if assertFailuresLeft > 0 { assertFailuresLeft -= 1; throw APIError.retryable }
         if let e = assertError { throw e }
         return try decode("{\"device_token\":\"TOK\",\"expires_in\":86400}")
     }
     func renewalChallenge(deviceId: UUID) async throws -> DeviceChallengeResponse {
         log.append("renewalChallenge")
+        if renewalNotFound { throw APIError.invalid(code: "DS_NOT_FOUND") }
         if let e = renewalError { throw e }
+        challenge = fresh()
         return try decode("{\"challenge\":\"\(challenge)\"}")
     }
     private func decode<T: Decodable>(_ s: String) throws -> T { try JSONDecoder().decode(T.self, from: Data(s.utf8)) }
@@ -191,19 +255,36 @@ final class DeviceEnrolmentTests: XCTestCase {
     func testEnrolmentSequenceAndClientDataHash() async throws {
         let (sut, api, att, clock) = makeSut()
         let r = try await sut.enrol(wardId: "W1")
-        XCTAssertEqual(api.log, ["deviceChallenge", "attest:KEY1:\(Data([1, 2, 3]).base64EncodedString()):W1", "assert"])
+        XCTAssertEqual(api.log, ["deviceChallenge", "attest:KEY1:\(Data([1, 2, 3]).base64EncodedString()):W1",
+                                 "deviceChallenge", "assert"])
         XCTAssertEqual(att.log, ["generateKey", "attest", "assertion"])
-        let raw = Data((0..<32).map { UInt8($0) })
-        let expected = Data(SHA256.hash(data: raw))
-        XCTAssertEqual(att.hashes, [expected, expected])
+        XCTAssertEqual(att.hashes.count, 2)
+        XCTAssertNotEqual(att.hashes[0], att.hashes[1], "assertion hashes a fresh challenge")
+        XCTAssertEqual(att.hashes[1], Data(SHA256.hash(data: Data(base64Encoded: api.challenge)!)))
         XCTAssertEqual(api.assertCalls.count, 1)
         XCTAssertEqual(api.assertCalls[0].0, api.deviceId)
         XCTAssertTrue(api.assertCalls[0].3, "enrolment assert is sent as the user")
         XCTAssertEqual(api.assertCalls[0].1, Data([4, 5, 6]).base64EncodedString())
+        XCTAssertEqual(api.assertCalls[0].2, api.challenge)
         XCTAssertEqual(r.deviceId, api.deviceId)
         XCTAssertEqual(r.keyId, "KEY1")
         XCTAssertEqual(r.deviceToken, "TOK")
         XCTAssertEqual(r.state.issuedAt, clock.wallNow)
+    }
+
+    func testAssertRetryDoesNotReAttest() async throws {
+        let (sut, api, att, _) = makeSut()
+        api.assertFailuresLeft = 1
+        var saved: EnrolmentProgress?
+        do { _ = try await sut.enrol(wardId: "W1", persist: { saved = $0 }); XCTFail() }
+        catch { XCTAssertEqual(error as? APIError, .retryable) }
+        XCTAssertEqual(saved, EnrolmentProgress(keyId: "KEY1", deviceId: api.deviceId))
+        api.log = []; att.log = []
+        let r = try await sut.enrol(wardId: "W1", resume: saved)
+        XCTAssertEqual(api.log, ["deviceChallenge", "assert"])
+        XCTAssertEqual(att.log, ["assertion"])
+        XCTAssertEqual(r.deviceId, api.deviceId)
+        XCTAssertEqual(r.keyId, "KEY1")
     }
 
     func testUnsupportedDeviceFailsBeforeAnyCall() async {
@@ -216,7 +297,7 @@ final class DeviceEnrolmentTests: XCTestCase {
 
     func testBadChallengeEncodingRejected() async {
         let (sut, api, _, _) = makeSut()
-        api.challenge = "!!!not base64!!!"
+        api.forcedChallenge = "!!!not base64!!!"
         do { _ = try await sut.enrol(wardId: "W1"); XCTFail() }
         catch { XCTAssertEqual(error as? DeviceEnrolmentError, .invalidChallenge) }
         XCTAssertEqual(api.log, ["deviceChallenge"])
@@ -264,6 +345,33 @@ final class DeviceEnrolmentTests: XCTestCase {
         XCTAssertEqual(out?.deviceToken, "TOK")
         XCTAssertEqual(state.issuedAt, clock.wallNow)
         XCTAssertFalse(state.needsRenewal(at: clock.wallNow))
+    }
+
+    func testRenewalChallenge404RequiresReEnrol() async throws {
+        let (sut, api, _, clock) = makeSut()
+        var state = DeviceTokenState(issuedAt: clock.wallNow, expiresIn: 86400)
+        clock.advance(21 * 3600)
+        api.renewalNotFound = true
+        let out = try await sut.renewIfDue(state: &state, deviceId: UUID(), keyId: "K")
+        XCTAssertNil(out)
+        XCTAssertTrue(state.reEnrolRequired)
+    }
+
+    func testUnauthorizedDuringRenewalBacksOffThenSurfacesError() async throws {
+        let (sut, api, _, clock) = makeSut()
+        var state = DeviceTokenState(issuedAt: clock.wallNow, expiresIn: 86400)
+        clock.advance(21 * 3600)
+        api.assertError = APIError.unauthorized
+        for i in 0..<4 {
+            let out = try await sut.renewIfDue(state: &state, deviceId: UUID(), keyId: "K")
+            XCTAssertNil(out)
+            XCTAssertFalse(state.reEnrolRequired, "attempt \(i)")
+            clock.advance(900)
+        }
+        do { _ = try await sut.renewIfDue(state: &state, deviceId: UUID(), keyId: "K"); XCTFail() }
+        catch { XCTAssertEqual(error as? DeviceEnrolmentError, .renewalRejected) }
+        XCTAssertFalse(state.reEnrolRequired)
+        XCTAssertTrue(state.renewalRejected)
     }
 
     func testRenewIfDueMarksReEnrolOnDeviceError() async throws {

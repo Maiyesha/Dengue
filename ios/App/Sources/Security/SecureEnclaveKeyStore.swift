@@ -15,21 +15,41 @@ import DengueCaptureCore
 ///
 /// UNVERIFIED: written without a macOS toolchain; compiled and run by ios.yml.
 public final class SecureEnclaveKeyStore: KeyStore {
-    public enum StoreError: Error { case keychain(OSStatus), corrupt }
+    public enum StoreError: Error { case keychain(OSStatus), corrupt, secureEnclaveUnavailable }
 
     public let usesSecureEnclave: Bool
     private let service: String
     private let wrappingTag: String
+    private let softwareForced: Bool
     private let lock = NSLock()
 
+    #if DEBUG
+    /// Debug builds only: use the software fallback even where a Secure Enclave exists.
     public init(service: String = "ai.reainmaker.denguecapture.artefact-keys", forceSoftware: Bool = false) {
         self.service = service
         self.wrappingTag = service + ".wrapping"
+        self.softwareForced = forceSoftware
         self.usesSecureEnclave = SecureEnclave.isAvailable && !forceSoftware
+    }
+    #else
+    public init(service: String = "ai.reainmaker.denguecapture.artefact-keys") {
+        self.service = service
+        self.wrappingTag = service + ".wrapping"
+        self.softwareForced = false
+        self.usesSecureEnclave = SecureEnclave.isAvailable
+    }
+    #endif
+
+    /// On device builds a missing Secure Enclave is an error, never a silent software fallback.
+    private func requireSecureEnclaveOnDevice() throws {
+        #if !targetEnvironment(simulator)
+        if !usesSecureEnclave && !softwareForced { throw StoreError.secureEnclaveUnavailable }
+        #endif
     }
 
     public func newKey() throws -> (id: String, key: SymmetricKey) {
         lock.lock(); defer { lock.unlock() }
+        try requireSecureEnclaveOnDevice()
         let id = UUID().uuidString
         let key = SymmetricKey(size: .bits256)
         let blob = try wrap(key, id: id)
@@ -39,6 +59,7 @@ public final class SecureEnclaveKeyStore: KeyStore {
 
     public func key(id: String) throws -> SymmetricKey {
         lock.lock(); defer { lock.unlock() }
+        try requireSecureEnclaveOnDevice()
         guard let blob = try keychainLoad(account: id) else { throw SealerError.keyUnavailable }
         return try unwrap(blob, id: id)
     }
@@ -52,7 +73,7 @@ public final class SecureEnclaveKeyStore: KeyStore {
     // MARK: Wrapping
 
     private func wrap(_ key: SymmetricKey, id: String) throws -> Data {
-        let wrappingPublic = try loadOrCreateWrappingKey().publicKey
+        let wrappingPublic = try loadOrCreateWrappingKey().publicKey   // only newKey creates
         let ephemeral = P256.KeyAgreement.PrivateKey()
         let shared = try ephemeral.sharedSecretFromKeyAgreement(with: wrappingPublic)
         let kek = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(),
@@ -67,7 +88,9 @@ public final class SecureEnclaveKeyStore: KeyStore {
         guard blob.count > 65 else { throw StoreError.corrupt }
         let ephPub = try P256.KeyAgreement.PublicKey(x963Representation: blob.prefix(65))
         let combined = blob.dropFirst(65)
-        let shared = try loadOrCreateWrappingKey().sharedSecretFromKeyAgreement(with: ephPub)
+        // key(id:) never creates a wrapping key: a missing one means the stored key is unrecoverable.
+        guard let wrapping = try loadWrappingKey() else { throw SealerError.keyUnavailable }
+        let shared = try wrapping.sharedSecretFromKeyAgreement(with: ephPub)
         let kek = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(),
                                                  sharedInfo: Data(id.utf8), outputByteCount: 32)
         let raw = try AES.GCM.open(try AES.GCM.SealedBox(combined: combined), using: kek,
@@ -95,12 +118,17 @@ public final class SecureEnclaveKeyStore: KeyStore {
         }
     }
 
+    private func loadWrappingKey() throws -> Agreeing? {
+        guard let data = try keychainLoad(account: wrappingTag) else { return nil }
+        return usesSecureEnclave
+            ? SEKey(k: try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: data))
+            : SWKey(k: try P256.KeyAgreement.PrivateKey(rawRepresentation: data))
+    }
+
+    /// Called from newKey only. SecItemAdd without a prior delete; if another creator won the race
+    /// (errSecDuplicateItem) the existing key is loaded and ours is discarded.
     private func loadOrCreateWrappingKey() throws -> Agreeing {
-        if let data = try keychainLoad(account: wrappingTag) {
-            return usesSecureEnclave
-                ? SEKey(k: try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: data))
-                : SWKey(k: try P256.KeyAgreement.PrivateKey(rawRepresentation: data))
-        }
+        if let existing = try loadWrappingKey() { return existing }
         if usesSecureEnclave {
             var err: Unmanaged<CFError>?
             guard let ac = SecAccessControlCreateWithFlags(
@@ -108,11 +136,15 @@ public final class SecureEnclaveKeyStore: KeyStore {
                 throw err!.takeRetainedValue() as Error
             }
             let k = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: ac)
-            try keychainStore(account: wrappingTag, data: k.dataRepresentation)
+            if try !keychainAdd(account: wrappingTag, data: k.dataRepresentation), let existing = try loadWrappingKey() {
+                return existing
+            }
             return SEKey(k: k)
         }
         let k = P256.KeyAgreement.PrivateKey()
-        try keychainStore(account: wrappingTag, data: k.rawRepresentation)
+        if try !keychainAdd(account: wrappingTag, data: k.rawRepresentation), let existing = try loadWrappingKey() {
+            return existing
+        }
         return SWKey(k: k)
     }
 
@@ -122,6 +154,17 @@ public final class SecureEnclaveKeyStore: KeyStore {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecAttrAccount as String: account]
+    }
+
+    /// Adds without deleting. Returns false on errSecDuplicateItem.
+    private func keychainAdd(account: String, data: Data) throws -> Bool {
+        var q = baseQuery(account: account)
+        q[kSecValueData as String] = data
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(q as CFDictionary, nil)
+        if status == errSecDuplicateItem { return false }
+        guard status == errSecSuccess else { throw StoreError.keychain(status) }
+        return true
     }
 
     private func keychainStore(account: String, data: Data) throws {
