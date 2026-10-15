@@ -101,7 +101,8 @@ public final class UploadEngine {
 
     /// Call at app launch (after the device token is renewed if due): recovers interrupted items, finishes
     /// interrupted quarantines and local-data destruction, then drains.
-    public func launch() async {
+    @discardableResult
+    public func launch(shouldContinue: @escaping () -> Bool = { true }) async -> Date? {
         try? outbox.recoverInFlight()
         for s in (try? outbox.pendingQuarantineSessions()) ?? [] {
             finishQuarantine(s)
@@ -113,16 +114,25 @@ public final class UploadEngine {
                 destroyIfAllVerified(rec.sessionId)
             }
         }
-        await drain()
+        return await drain(shouldContinue: shouldContinue)
     }
 
     // MARK: drain
 
-    /// Processes ready outbox items in order until none is ready. Concurrent calls return immediately.
-    public func drain() async {
-        guard beginDrain() else { return }
-        defer { endDrain() }
-        while true {
+    /// Processes ready outbox items in order until none is ready, or until `shouldContinue` returns false
+    /// (checked before each item; e.g. the app's background time expired).
+    /// Returns when to drain again (`Outbox.nextWakeAt`, possibly already due), or nil when nothing is pending.
+    /// A concurrent call returns nil immediately; the running drain reports.
+    @discardableResult
+    public func drain(shouldContinue: @escaping () -> Bool = { true }) async -> Date? {
+        guard beginDrain() else { return nil }
+        await drainLoop(shouldContinue)
+        endDrain()
+        return try? outbox.nextWakeAt()
+    }
+
+    private func drainLoop(_ shouldContinue: () -> Bool) async {
+        while shouldContinue() {
             guard let item = try? outbox.nextReady() else { return }
             do { try outbox.markInFlight(item.id) } catch { return }
             do {
@@ -278,10 +288,17 @@ public final class UploadEngine {
         case .quarantineRequired(let s):
             finishQuarantine(s)
         case .refetchScan(let s):
-            if item.kind == .recapture { abandonRecaptureArtefacts(recaptureItem: item.id, sessionId: s) }
+            if item.kind == .recapture {
+                var recaptured: [String] = []
+                if case .recaptureExhausted(_, let r, _) = e { recaptured = r }
+                abandonRecaptureArtefacts(recaptureItem: item.id, sessionId: s, recaptured: Set(recaptured))
+            }
             await refetch(s)
         case .needsRepeat:
-            if case .needsRepeat(let reasons) = e { markRepeat(item.sessionId, reasons: reasons) }
+            if case .needsRepeat(let reasons) = e {
+                let step = (try? artefact(for: item))?.1.step
+                markRepeat(item.sessionId, reasons: reasons, steps: step.map { [$0] } ?? [])
+            }
         case .failed:
             if Self.isArtefactKind(item.kind) { markArtefactsFailed(item) }
         case .retryScheduled, .ignoredFrozen:
@@ -300,17 +317,20 @@ public final class UploadEngine {
         try? updateArtefact(item.sessionId, p.artefactLocalId) { $0.status = .failed }
     }
 
-    /// DS_QG_099: the server will take no more attempts. The new attempt's artefacts can never be uploaded:
-    /// fail their items and destroy their keys/files. The nurse is never asked to repeat.
-    private func abandonRecaptureArtefacts(recaptureItem: UUID, sessionId: UUID) {
+    /// DS_QG_099: the server took no more attempts for the steps NOT in `recaptured` (it may still have
+    /// recaptured others: scans.ts commits the partial recapture). Artefacts of the exhausted steps can never
+    /// be uploaded: fail their items and destroy their keys/files (status `.abandoned`). Artefacts of
+    /// recaptured steps proceed (their dependency, the recapture item, is done). The nurse is never asked
+    /// to repeat.
+    private func abandonRecaptureArtefacts(recaptureItem: UUID, sessionId: UUID, recaptured: Set<String>) {
         guard let items = try? outbox.items(sessionId: sessionId) else { return }
         for d in items where d.dependsOn == recaptureItem && d.kind == .declareArtefact {
-            _ = try? outbox.apply(.invalid(code: "DS_QG_099"), to: d.id)
             guard let p = try? decode(UploadPayload.Artefact.self, d.payload),
                   let a = try? artefact(sessionId: sessionId, localId: p.artefactLocalId) else { continue }
-            if destroyLocal([a]) {
-                try? updateArtefact(sessionId, a.localId) { $0.status = .failed }
-            }
+            if recaptured.contains(a.step.rawValue) { continue }
+            _ = try? outbox.apply(.invalid(code: "DS_QG_099"), to: d.id)
+            let destroyed = destroyLocal([a])
+            try? updateArtefact(sessionId, a.localId) { $0.status = destroyed ? .abandoned : .failed }
         }
     }
 
@@ -329,8 +349,9 @@ public final class UploadEngine {
 
     private func destroyIfAllVerified(_ sessionId: UUID) {
         recordLock.lock(); defer { recordLock.unlock() }
-        guard let rec = record(sessionId), !rec.localDataDestroyed, !rec.artefacts.isEmpty,
-              rec.artefacts.allSatisfy({ $0.status == .verified }) else { return }
+        guard let rec = record(sessionId), !rec.localDataDestroyed,
+              rec.artefacts.contains(where: { $0.status == .verified }),
+              rec.artefacts.allSatisfy({ $0.status == .verified || $0.status == .abandoned }) else { return }
         let ok = destroyLocal(rec.artefacts)
         try? update(sessionId) {
             $0.localDataDestroyed = ok
@@ -366,37 +387,61 @@ public final class UploadEngine {
     }
 
     private func refetch(_ sessionId: UUID) async {
-        guard let scanId = record(sessionId)?.scanId,
+        guard let rec = record(sessionId) else { return }
+        let uploading: Set<ArtefactUpload.Status> = [.pending, .declared, .uploaded]
+        if rec.artefacts.contains(where: { uploading.contains($0.status) }) { return }   // verdict comes later
+        guard let scanId = rec.scanId,
               let r = try? await api.getScan(id: scanId, auth: .device) else { return }
         applyVerdict(sessionId, r.scan, allowRepeat: false)
     }
 
-    private static let failVerdicts: Set<String> = ["fail", "failed"]
+    /// Step `server_verdict` values (lowercased) that request a repeat.
+    private static let failVerdicts: Set<String> = ["fail", "failed", "recapture"]
 
+    /// Core steps of the protocol: repeated when the scan failed without naming a step.
+    static let coreSteps: [CaptureStepName] = CaptureProtocol.phaseADefault.steps.filter { $0.isCore }
+        .compactMap { CaptureStepName(rawValue: $0.step.rawValue) }
+
+    /// Ruling R1: the scan status decides.
+    /// - quality_pending / capture_pending: keep waiting.
+    /// - quality_passed, feature_*, review_pending, reviewed, flagged, excluded, archived: accepted.
+    /// - quality_failed: repeat the steps whose latest attempt failed (fail/failed/recapture); if none is
+    ///   named, repeat all core steps. After DS_QG_099 (`allowRepeat == false`) it is closed instead.
+    /// - acquisition_failure: closed with `NurseCopy.acquisitionFailure`.
+    /// - partial, revoked: closed.
     private func applyVerdict(_ sessionId: UUID, _ scan: ScanDetail, allowRepeat: Bool) {
-        if scan.status == .qualityPending || scan.status == .capturePending {
+        func close(_ notice: String?) { try? update(sessionId) { $0.verdict = .closed; $0.notice = notice } }
+        switch scan.status {
+        case .qualityPending, .capturePending:
             if !allowRepeat { try? update(sessionId) { $0.verdict = .awaitingVerdict } }
-            return
-        }
-        // Latest attempt per step decides.
-        var latest: [String: ScanStepState] = [:]
-        for s in scan.steps where (latest[s.step]?.attempt ?? Int.min) <= s.attempt { latest[s.step] = s }
-        let failing = latest.values.filter { Self.failVerdicts.contains(($0.serverVerdict ?? "").lowercased()) }
-            .sorted { $0.step < $1.step }
-        if allowRepeat, !failing.isEmpty {
+        case .qualityPassed, .featurePending, .featureComplete, .reviewPending, .reviewed, .flagged, .excluded,
+             .archived:
+            try? update(sessionId) { $0.verdict = .accepted; $0.notice = nil }
+        case .acquisitionFailure:
+            close(NurseCopy.acquisitionFailure)
+        case .partial, .revoked:
+            close(nil)
+        case .qualityFailed:
+            guard allowRepeat else { close(nil); return }
+            // Latest attempt per step decides.
+            var latest: [String: ScanStepState] = [:]
+            for s in scan.steps where (latest[s.step]?.attempt ?? Int.min) <= s.attempt { latest[s.step] = s }
+            let failing = latest.values
+                .filter { Self.failVerdicts.contains(($0.serverVerdict ?? "").lowercased()) }
+                .sorted { $0.step < $1.step }
             var reasons: [ReasonCode] = []
             for s in failing {
                 for c in s.reasonCodes { if let rc = ReasonCode(rawValue: c), !reasons.contains(rc) { reasons.append(rc) } }
             }
+            var steps = failing.compactMap { CaptureStepName(rawValue: $0.step) }
+            if steps.isEmpty { steps = Self.coreSteps }
             try? outbox.markNeedsRepeat(sessionId: sessionId, reasons: reasons)
-            markRepeat(sessionId, reasons: reasons)
-        } else {
-            try? update(sessionId) { $0.verdict = allowRepeat ? .accepted : .closed }
+            markRepeat(sessionId, reasons: reasons, steps: steps)
         }
     }
 
     /// Records the repeat request and posts the notice once. Text: "A recording for ••123 needs repeating".
-    private func markRepeat(_ sessionId: UUID, reasons: [ReasonCode]) {
+    private func markRepeat(_ sessionId: UUID, reasons: [ReasonCode], steps: [CaptureStepName]) {
         var notifyText: String?
         try? update(sessionId) {
             if $0.verdict != .needsRepeat {
@@ -404,6 +449,8 @@ public final class UploadEngine {
             }
             $0.verdict = .needsRepeat
             $0.repeatReasons = reasons
+            $0.repeatSteps = steps
+            $0.notice = nil
         }
         if let t = notifyText { notifier.postRepeatNotice(t) }
     }

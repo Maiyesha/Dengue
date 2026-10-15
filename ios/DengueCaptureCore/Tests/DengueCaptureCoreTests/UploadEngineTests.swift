@@ -625,6 +625,149 @@ final class UploadEngineTests: XCTestCase {
         XCTAssertFalse(log.events.contains("complete"))
     }
 
+    // MARK: fix round 1
+
+    /// I1: partial DS_QG_099 - only artefacts of steps the server did NOT recapture are abandoned.
+    func testPartialRecaptureExhaustedKeepsRecapturedArtefacts() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        let s = try enqueue(engine, [a])
+        await engine.drain()
+        let rFace = try makeArtefact(size: 400, step: .neutralFace)
+        let rEye = try makeArtefact(size: 500, step: .ocularCapture)
+        api.recaptureErrors = [.recaptureExhausted(unableToAcquire: ["ocular_capture"], recaptured: ["neutral_face"],
+                                                   status: "capture_pending")]
+        api.scanResponse = try scan(status: .capturePending, steps: [("neutral_face", nil, [])])
+        api.completeErrorQueue = [.retryable]   // rFace's first complete
+        try engine.enqueueRecapture(sessionId: s, steps: [.neutralFace, .ocularCapture], reason: "DS_QG_002",
+                                    artefacts: [rFace, rEye])
+        await engine.drain()
+        var rec = try XCTUnwrap(engine.record(s))
+        XCTAssertEqual(rec.artefacts.first { $0.localId == rEye.localId }?.status, .abandoned)
+        XCTAssertFalse(fileExists(rEye) || keyExists(rEye), "exhausted step data destroyed")
+        XCTAssertEqual(rec.artefacts.first { $0.localId == rFace.localId }?.status, .uploaded)
+        XCTAssertTrue(fileExists(rFace) && keyExists(rFace), "recaptured step data kept")
+        XCTAssertEqual(api.declares.filter { $0.request.step == .neutralFace }.count, 2, "recaptured artefact declared")
+        XCTAssertEqual(api.declares.filter { $0.request.step == .ocularCapture }.count, 0)
+        XCTAssertEqual(rec.verdict, .uploading)
+        XCTAssertTrue(notifier.texts.isEmpty)
+
+        clock.wallNow = clock.wallNow.addingTimeInterval(3600)
+        await engine.drain()
+        rec = try XCTUnwrap(engine.record(s))
+        XCTAssertEqual(rec.artefacts.first { $0.localId == rFace.localId }?.status, .verified)
+        XCTAssertFalse(fileExists(rFace) || keyExists(rFace), "destroyed once everything left is verified")
+        XCTAssertTrue(rec.localDataDestroyed)
+        XCTAssertEqual(rec.verdict, .awaitingVerdict)
+    }
+
+    /// I2: drain reports when to wake for the earliest retry.
+    func testDrainReturnsNextWakeAtForBackoffAndNilWhenDone() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        uploader.outcomes[1] = [.transportError]
+        try enqueue(engine, [a])
+        let wake = await engine.drain()
+        XCTAssertEqual(wake, clock.wallNow.addingTimeInterval(Outbox.backoff(attempts: 1)))
+        clock.wallNow = clock.wallNow.addingTimeInterval(3600)
+        let wake2 = await engine.drain()
+        XCTAssertNil(wake2)
+    }
+
+    func testNextWakeIgnoresFrozenSessions() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        let s = try enqueue(engine, [a])
+        let create = try XCTUnwrap(outbox.items(sessionId: s).first { $0.kind == .createScan })
+        XCTAssertEqual(try outbox.nextWakeAt(), clock.wallNow)
+        try outbox.markInFlight(create.id)
+        _ = try outbox.apply(.needsRepeat([]), to: create.id)   // freezes the whole session
+        XCTAssertNil(try outbox.nextWakeAt())
+    }
+
+    /// I5 (core part): drain stops starting new items once told to.
+    func testDrainStopsStartingItemsWhenShouldContinueTurnsFalse() async throws {
+        let engine = makeEngine()
+        let a = try makeArtefact(size: 300)
+        try enqueue(engine, [a])
+        var checks = 0
+        let wake = await engine.drain(shouldContinue: { checks += 1; return checks <= 1 })
+        XCTAssertEqual(log.events, ["createScan"])
+        let w = try XCTUnwrap(wake, "remaining work is due now")
+        XCTAssertLessThanOrEqual(w, clock.wallNow)
+    }
+
+    /// I3: concurrent callers share one in-flight operation.
+    func testSingleFlightRunsOperationOnceForConcurrentCallers() async throws {
+        let flight = SingleFlight<Int>()
+        let counter = Counter()
+        let gate = Gate()
+        let results = await withTaskGroup(of: Int.self) { group -> [Int] in
+            for _ in 0..<5 {
+                group.addTask {
+                    await flight.run {
+                        counter.increment()
+                        await gate.wait()
+                        return 42
+                    }
+                }
+            }
+            while flight.joinedCount < 5 { await Task.yield() }
+            gate.open()
+            var out: [Int] = []
+            for await r in group { out.append(r) }
+            return out
+        }
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(results, [42, 42, 42, 42, 42])
+        // A later call starts a fresh operation.
+        let again = await flight.run { counter.increment(); return 7 }
+        XCTAssertEqual(again, 7)
+        XCTAssertEqual(counter.value, 2)
+    }
+
+    /// I4 + R1: verdict table.
+    func testVerdictTable() async throws {
+        let engine = makeEngine()
+        func verdict(_ status: ScanStatus, _ steps: [(String, String?, [String])]) async throws -> UploadSessionRecord {
+            let sid = UUID()
+            var rec = UploadSessionRecord(sessionId: sid, maskedCode: "\u{2022}\u{2022}417", scanId: api.scanId, artefacts: [])
+            rec.verdict = .awaitingVerdict
+            try sessions.save(rec)
+            api.scanResponse = try scan(status: status, steps: steps)
+            await engine.refreshVerdicts()
+            return try XCTUnwrap(engine.record(sid))
+        }
+        var r = try await verdict(.qualityFailed, [("neutral_face", "RECAPTURE", ["DS_QG_001"]), ("fingertip_ppg", "pass", [])])
+        XCTAssertEqual(r.verdict, .needsRepeat)
+        XCTAssertEqual(r.repeatSteps, [.neutralFace])
+        XCTAssertEqual(r.repeatReasons, [.dsQG001])
+
+        r = try await verdict(.qualityFailed, [("neutral_face", "pass", []), ("fingertip_ppg", nil, [])])
+        XCTAssertEqual(r.verdict, .needsRepeat, "quality_failed without a failing step: repeat all core steps")
+        XCTAssertEqual(r.repeatSteps, [.neutralFace, .fingertipPPG])
+        XCTAssertEqual(notifier.texts.count, 2)
+
+        r = try await verdict(.acquisitionFailure, [])
+        XCTAssertEqual(r.verdict, .closed)
+        XCTAssertEqual(r.notice, NurseCopy.acquisitionFailure)
+
+        let accepted: [ScanStatus] = [.qualityPassed, .featurePending, .featureComplete, .reviewPending, .reviewed,
+                                      .flagged, .excluded, .archived]
+        for st in accepted {
+            r = try await verdict(st, [])
+            XCTAssertEqual(r.verdict, .accepted, st.rawValue)
+            XCTAssertNil(r.notice)
+        }
+        let closed: [ScanStatus] = [.partial, .revoked]
+        for st in closed {
+            r = try await verdict(st, [])
+            XCTAssertEqual(r.verdict, .closed, st.rawValue)
+            XCTAssertNil(r.notice)
+        }
+        XCTAssertEqual(notifier.texts.count, 2, "only the two repeat rows notify")
+    }
+
     func testFileSessionStoreSurvivesReopen() throws {
         let d = dir.appendingPathComponent("sessions")
         let a = try makeArtefact(size: 10)
@@ -640,5 +783,31 @@ final class UploadEngineTests: XCTestCase {
         XCTAssertEqual(NurseCopy.maskedStudyID("DS-2026-00417"), "••417")
         XCTAssertEqual(NurseCopy.maskedStudyID("17"), "••17")
         XCTAssertEqual(NurseCopy.repeatNotification(maskedStudyID: "••417"), "A recording for ••417 needs repeating")
+    }
+}
+
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func increment() { lock.lock(); n += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+}
+
+/// One-shot async gate.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if isOpen { lock.unlock(); c.resume(); return }
+            waiters.append(c)
+            lock.unlock()
+        }
+    }
+    func open() {
+        lock.lock(); isOpen = true; let ws = waiters; waiters = []; lock.unlock()
+        ws.forEach { $0.resume() }
     }
 }

@@ -61,6 +61,17 @@ public final class Outbox {
             .element
     }
 
+    /// When the next pending item becomes due: the earliest `nextAttemptAt` among pending items whose
+    /// dependency (if any) is done. Items waiting on a pending dependency are covered by that dependency;
+    /// items behind a frozen or failed dependency never become ready and are ignored. nil = nothing to wake for.
+    public func nextWakeAt() throws -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        let all = try store.loadAll()
+        let done = Set(all.filter { $0.status == .done }.map { $0.id })
+        return all.filter { $0.status == .pending && ($0.dependsOn.map(done.contains) ?? true) }
+            .map { $0.nextAttemptAt }.min()
+    }
+
     /// Statuses a late callback must not revive.
     private static func isFrozen(_ s: OutboxItem.Status) -> Bool {
         s == .quarantined || s == .failed || s == .needsRepeat || s == .quarantinePending

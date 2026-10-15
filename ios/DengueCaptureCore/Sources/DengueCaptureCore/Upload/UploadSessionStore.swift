@@ -21,7 +21,10 @@ public enum UploadPayload {
 
 /// What is uploaded for one artefact, plus its upload progress.
 public struct ArtefactUpload: Codable, Equatable {
-    public enum Status: String, Codable, Equatable { case pending, declared, uploaded, verified, failed }
+    public enum Status: String, Codable, Equatable { case pending, declared, uploaded, verified, failed
+        /// Never uploaded (server took no more attempts for its step); key and file destroyed.
+        case abandoned
+    }
 
     public let localId: UUID
     public let step: CaptureStepName
@@ -63,6 +66,10 @@ public struct UploadSessionRecord: Codable, Equatable {
     public var localDataDestroyed = false
     public var verdict: Verdict = .uploading
     public var repeatReasons: [ReasonCode] = []
+    /// Steps the nurse must record again (with `.needsRepeat`).
+    public var repeatSteps: [CaptureStepName] = []
+    /// Nurse-facing copy for a closed session (e.g. `NurseCopy.acquisitionFailure`).
+    public var notice: String?
 
     public init(sessionId: UUID, maskedCode: String, scanId: UUID?, artefacts: [ArtefactUpload]) {
         self.sessionId = sessionId; self.maskedCode = maskedCode; self.scanId = scanId; self.artefacts = artefacts
