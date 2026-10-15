@@ -207,11 +207,11 @@ public final class UploadEngine {
     public func launch(shouldContinue: @escaping () -> Bool = { true }) async -> DrainResult {
         try? outbox.recoverInFlight()
         for s in (try? outbox.pendingQuarantineSessions()) ?? [] {
-            finishQuarantine(s)
+            finishQuarantine(s, cause: .quarantineResume)
         }
         for rec in (withRecords { try? sessions.loadAll() } ?? []) where !rec.localDataDestroyed {
             if rec.verdict == .quarantined {
-                finishQuarantine(rec.sessionId)
+                finishQuarantine(rec.sessionId, cause: .quarantineResume)
             } else {
                 destroyIfAllVerified(rec.sessionId)
             }
@@ -404,13 +404,20 @@ public final class UploadEngine {
                 try? update(item.sessionId) { $0.diagnostic = diagnostic }
                 return (try? outbox.apply(.retryable, to: item.id)) != nil
             case .serverDirective:
-                break   // quarantine / repeat: handled below like any other item
+                break   // DS_REG_001 / DS_REG_002 only: the consent-stop quarantine below
             }
+        }
+        if case .stopAndQuarantine(let code) = e, !CreateScanFailurePolicy.consentStopCodes.contains(code) {
+            // Round 2 (I3): an unrecognised DS_REG_* is not a consent stop: keep the data and retry.
+            try? update(item.sessionId) { $0.diagnostic = code }
+            return (try? outbox.apply(.retryable, to: item.id)) != nil
         }
         guard let action = try? outbox.apply(e, to: item.id) else { return false }
         switch action {
         case .quarantineRequired(let s):
-            finishQuarantine(s)
+            var code = ""
+            if case .stopAndQuarantine(let c) = e { code = c }
+            finishQuarantine(s, cause: .consentStop(code: code))
         case .refetchScan(let s):
             if item.kind == .recapture {
                 var recaptured: [String] = []
@@ -455,15 +462,20 @@ public final class UploadEngine {
             assertionFailure("createScan destroy path reached with a non-destroy error: \(error)")
             return
         }
-        closeSession(sessionId, notice: notice)
+        closeSession(sessionId, notice: notice, because: .createScanRejected(error))
     }
 
-    /// Terminal close (I2/I3): nothing more is sent; every key and sealed file of the session is destroyed.
-    private func closeSession(_ sessionId: UUID, notice: String?) {
+    /// Terminal close (I2/I3): nothing more is sent; every key and sealed file of the session is destroyed
+    /// (round 2: only when `DataDestructionPolicy` permits `reason`; otherwise nothing is closed or destroyed).
+    private func closeSession(_ sessionId: UUID, notice: String?, because reason: DestroyCause) {
+        guard DataDestructionPolicy.permits(reason) else {
+            assertionFailure("close refused by DataDestructionPolicy: \(reason)")
+            return
+        }
         try? outbox.abandonSession(sessionId, reason: "closed")
         guard let rec = record(sessionId) else { return }
         let live = rec.artefacts.filter { $0.status != .abandoned }
-        let ok = rec.localDataDestroyed ? true : destroyLocal(live)
+        let ok = rec.localDataDestroyed ? true : destroyLocal(live, cause: reason)
         try? update(sessionId) {
             $0.verdict = .closed
             $0.notice = notice
@@ -497,7 +509,7 @@ public final class UploadEngine {
                   let a = try? artefact(sessionId: sessionId, localId: p.artefactLocalId) else { continue }
             if recaptured.contains(a.step.rawValue) { continue }
             _ = try? outbox.apply(.invalid(code: "DS_QG_099"), to: d.id)
-            let destroyed = destroyLocal([a])
+            let destroyed = destroyLocal([a], cause: .recaptureExhausted)
             try? updateArtefact(sessionId, a.localId) { $0.status = destroyed ? .abandoned : .failed }
         }
         destroyIfAllVerified(sessionId)   // only verified + abandoned left: the session's local data is gone
@@ -505,11 +517,15 @@ public final class UploadEngine {
 
     // MARK: quarantine and destruction
 
-    private func finishQuarantine(_ sessionId: UUID) {
+    private func finishQuarantine(_ sessionId: UUID, cause: DestroyCause) {
+        guard DataDestructionPolicy.permits(cause) else {
+            assertionFailure("quarantine refused by DataDestructionPolicy: \(cause)")
+            return
+        }
         let rec = record(sessionId)
-        let sealed = rec?.artefacts.map { $0.sealed } ?? []
-        var destroyed = true
-        do { try outbox.quarantine(sessionId: sessionId, keys: keys, sealedPaths: sealed) } catch { destroyed = false }
+        var destroyed = destroyLocal(rec?.artefacts ?? [], cause: cause)
+        // The outbox only marks the session quarantined: the funnel above did the destruction.
+        do { try outbox.quarantine(sessionId: sessionId, keys: keys, sealedPaths: []) } catch { destroyed = false }
         try? update(sessionId) {
             $0.verdict = .quarantined
             $0.localDataDestroyed = destroyed
@@ -521,16 +537,22 @@ public final class UploadEngine {
         // Every artefact finished: verified, or abandoned (never uploadable, already destroyed).
         guard let rec = record(sessionId), !rec.localDataDestroyed, !rec.artefacts.isEmpty,
               rec.artefacts.allSatisfy({ $0.status == .verified || $0.status == .abandoned }) else { return }
-        let ok = destroyLocal(rec.artefacts)
+        let ok = destroyLocal(rec.artefacts, cause: .allVerified)
         try? update(sessionId) {
             $0.localDataDestroyed = ok
             if $0.verdict == .uploading { $0.verdict = .awaitingVerdict }
         }
     }
 
-    /// Destroys keys ("deletion means destroying the key") and removes sealed files. True when all succeeded.
+    /// THE destroy funnel (round 2, I3): the only place that destroys keys ("deletion means destroying the key")
+    /// and removes sealed files. Refuses (false, nothing touched) unless `DataDestructionPolicy` permits `cause`.
+    /// True when all succeeded.
     @discardableResult
-    private func destroyLocal(_ artefacts: [ArtefactUpload]) -> Bool {
+    private func destroyLocal(_ artefacts: [ArtefactUpload], cause: DestroyCause) -> Bool {
+        guard DataDestructionPolicy.permits(cause) else {
+            assertionFailure("destroy refused by DataDestructionPolicy: \(cause)")
+            return false
+        }
         var ok = true
         let fm = FileManager.default
         for a in artefacts {
@@ -616,7 +638,7 @@ public final class UploadEngine {
     private func markRepeat(_ sessionId: UUID, reasons: [ReasonCode], steps: [CaptureStepName]) {
         // I2: past the 2 h window a repeat cannot be offered: closed as an acquisition failure, no notice.
         if let rec = record(sessionId), !RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()) {
-            closeSession(sessionId, notice: NurseCopy.acquisitionFailure)
+            closeSession(sessionId, notice: NurseCopy.acquisitionFailure, because: .repeatWindowExpired)
             return
         }
         var notifyText: String?
@@ -671,7 +693,7 @@ public final class UploadEngine {
         let t = now()
         for r in (withRecords { try? sessions.loadAll() } ?? []) where r.verdict == .needsRepeat
             && !RetentionPolicy.repeatOffered(capturedAt: r.capturedAt, now: t) {
-            closeSession(r.sessionId, notice: NurseCopy.acquisitionFailure)
+            closeSession(r.sessionId, notice: NurseCopy.acquisitionFailure, because: .repeatWindowExpired)
         }
     }
 

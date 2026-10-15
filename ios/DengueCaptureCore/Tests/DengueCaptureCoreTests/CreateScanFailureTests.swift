@@ -193,15 +193,24 @@ final class CreateScanFailureTests: XCTestCase {
             (.invalid(code: "DS_IDEMPOTENCY_001"), .hold(diagnostic: "DS_IDEMPOTENCY_001")),
             (.uploadHashMismatch, .hold(diagnostic: "DS_UPLOAD_001")),
             (.reEnrol, .hold(diagnostic: "DS_DEVICE_001")),
+            // Round 2 (I3): only the consent stops are a server directive on createScan.
             (.stopAndQuarantine(code: "DS_REG_001"), .serverDirective),
-            (.needsRepeat([.dsQG001]), .serverDirective),
-            (.recaptureExhausted(unableToAcquire: [], recaptured: [], status: "partial"), .serverDirective),
+            (.stopAndQuarantine(code: "DS_REG_002"), .serverDirective),
+            (.stopAndQuarantine(code: "DS_REG_901"), .hold(diagnostic: "DS_REG_901")),
+            (.needsRepeat([.dsQG001]), .hold(diagnostic: "DS_QG_001")),
+            (.needsRepeat([]), .hold(diagnostic: "DS_QG_UNNAMED")),   // e.g. DS_QG_123, DS_SEG_9, DS_RPPG_42
+            (APIError.from(code: "DS_QG_123", httpStatus: 422), .hold(diagnostic: "DS_QG_UNNAMED")),
+            (APIError.from(code: "DS_SEG_9", httpStatus: 422), .hold(diagnostic: "DS_QG_UNNAMED")),
+            (APIError.from(code: "DS_REG_977", httpStatus: 451), .hold(diagnostic: "DS_REG_977")),
+            (.recaptureExhausted(unableToAcquire: [], recaptured: [], status: "partial"), .hold(diagnostic: "DS_QG_099")),
         ]
         for (error, expected) in table {
             let d = CreateScanFailurePolicy.decide(error: error)
             XCTAssertEqual(d, expected, "\(error)")
             if case .closeAndDestroy = d {
                 XCTAssertTrue(CreateScanFailurePolicy.permitsDestroy(error), "\(error)")
+            } else if case .serverDirective = d {
+                XCTAssertTrue(CreateScanFailurePolicy.permitsDestroy(error), "consent stop \(error)")
             } else {
                 XCTAssertFalse(CreateScanFailurePolicy.permitsDestroy(error), "guard must refuse \(error)")
             }
