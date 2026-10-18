@@ -472,7 +472,7 @@ final class FlowCoordinator: ObservableObject {
                 // R-3: a server-requested repeat never checkpoints a standalone hand-off of the original session
                 // (no patient id: it would be held as HANDOFF_PATIENT_UNKNOWN). It ends in enqueueRecapture.
                 guard self.repeatRequest == nil else {
-                    if self.flow.authPending { self.checkpointForReauth() }   // round 2 (I4): repeat-pending record
+                    self.checkpointForReauth()   // round 3: repeat-pending record after every sealed step (idempotent)
                     return
                 }
                 CaptureStorage.shared?.checkpoint(self.pending(artefacts: self.sealedSoFar))
@@ -538,14 +538,23 @@ final class FlowCoordinator: ObservableObject {
         camera.stop(owner: cameraOwner)
         let tasks = acceptedSealing
         let accepted = flow.attemptLog.filter { $0.verdict == .accept }.map { $0.step }
+        let captured = capturedAt ?? Date()
+        let reason = r.reasons.first?.rawValue ?? "nurse_repeat"
         Task.detached {
             var sealed: [SealedStepArtefact] = []
             for t in tasks { sealed += await t.value }
-            guard let engine = UploadCoordinator.shared?.engine else { storage.destroy(sealed); return }
+            guard let engine = UploadCoordinator.shared?.engine else {
+                // Round 3: no upload engine (MDM not provisioned yet): hold, never destroy. retryHeld routes the
+                // closed .repeatPending record to submitRepeat once the engine exists.
+                storage.checkpointRepeat(sessionId: r.sessionId, maskedCode: r.maskedCode, capturedAt: captured,
+                                         reason: reason, accepted: accepted, sealed: sealed, isOpen: false)
+                return
+            }
             storage.reloadKMSConfig()
-            let outcome = storage.handoffs.submitRepeat(sessionId: r.sessionId,
-                                                        reason: r.reasons.first?.rawValue ?? "nurse_repeat",
-                                                        accepted: accepted, sealed: sealed, engine: engine)
+            // Round 3: masked code and capture time make a held repeat row identifiable.
+            let outcome = storage.handoffs.submitRepeat(sessionId: r.sessionId, reason: reason, accepted: accepted,
+                                                        sealed: sealed, engine: engine, maskedCode: r.maskedCode,
+                                                        capturedAt: captured)
             if outcome == .enqueued { UploadCoordinator.shared?.drainSoon() }
         }
     }

@@ -114,9 +114,9 @@ final class CaptureStorage: @unchecked Sendable {
 
     /// Round 2 (I4): a repeat flow's accepted artefacts while sign-in is required (`.repeatPending`).
     func checkpointRepeat(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
-                          accepted: [CaptureStep], sealed: [SealedStepArtefact]) {
+                          accepted: [CaptureStep], sealed: [SealedStepArtefact], isOpen: Bool = true) {
         try? handoffs.checkpointRepeat(sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt,
-                                       reason: reason, accepted: accepted, sealed: sealed)
+                                       reason: reason, accepted: accepted, sealed: sealed, isOpen: isOpen)
     }
 
     @discardableResult
