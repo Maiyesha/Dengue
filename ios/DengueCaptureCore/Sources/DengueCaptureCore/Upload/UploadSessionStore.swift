@@ -15,7 +15,11 @@ public enum UploadPayload {
     public struct Recapture: Codable, Equatable {
         public let steps: [CaptureStepName]
         public let reason: String
-        public init(steps: [CaptureStepName], reason: String) { self.steps = steps; self.reason = reason }
+        /// Round 3: sealed key ids of the artefacts this recapture carries (identity for repair). nil in older items.
+        public let keyIds: [String]?
+        public init(steps: [CaptureStepName], reason: String, keyIds: [String]? = nil) {
+            self.steps = steps; self.reason = reason; self.keyIds = keyIds
+        }
     }
 }
 

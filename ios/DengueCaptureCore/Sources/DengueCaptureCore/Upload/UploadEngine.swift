@@ -99,23 +99,72 @@ public final class UploadEngine {
 
     /// Enqueues a recapture request and the new attempt's artefacts (which wait for the recapture).
     /// I2: refused after the 2 h repeat window (`repeatWindowExpired`) and for artefacts without a wrapped key.
+    ///
+    /// Round 3: idempotent and repairable by SEALED KEY ID (like `ensureSessionItems`). Artefacts the record already
+    /// holds are never added again (whatever attempt number is passed); the window and KMS checks apply only to new
+    /// ones. Missing items are re-queued: the recapture item carrying these key ids (or the one their declare items
+    /// depend on) is reused, otherwise one is enqueued; each artefact's declare / upload / complete chain is completed.
+    /// So a recapture whose outbox write failed (or was interrupted) is repaired by calling this again.
     public func enqueueRecapture(sessionId: UUID, steps: [CaptureStepName], reason: String,
                                  artefacts: [ArtefactUpload]) throws {
         guard let rec = record(sessionId) else { throw UploadEngineError.unknownSession }
-        guard RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()), rec.verdict != .closed,
-              rec.verdict != .quarantined else { throw UploadEngineError.repeatWindowExpired }
-        guard artefacts.allSatisfy({ $0.sealed.wrappedKey != nil }) else { throw UploadEngineError.kmsKeyMissing }
-        try update(sessionId) {
-            $0.artefacts += artefacts
-            if !artefacts.isEmpty {
+        let known = Set(rec.artefacts.map { $0.sealed.keyId })
+        var seen = Set<String>()
+        let fresh = artefacts.filter { !known.contains($0.sealed.keyId) && seen.insert($0.sealed.keyId).inserted }
+        if !fresh.isEmpty {
+            guard RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()), rec.verdict != .closed,
+                  rec.verdict != .quarantined else { throw UploadEngineError.repeatWindowExpired }
+            guard fresh.allSatisfy({ $0.sealed.wrappedKey != nil }) else { throw UploadEngineError.kmsKeyMissing }
+            try update(sessionId) {
+                $0.artefacts += fresh
                 $0.verdict = .uploading
                 $0.localDataDestroyed = false
                 $0.repeatReasons = []
             }
         }
-        let payload = try JSONEncoder().encode(UploadPayload.Recapture(steps: steps, reason: reason))
-        let r = try outbox.enqueue(.recapture, sessionId: sessionId, payload: payload)
-        try enqueueArtefactItems(sessionId: sessionId, artefacts, after: r.id)
+        let keyIds = Set(artefacts.map { $0.sealed.keyId })
+        if keyIds.isEmpty {
+            // A recapture request without new artefacts (as before round 3): window applies, one item per call.
+            guard RetentionPolicy.repeatOffered(capturedAt: rec.capturedAt, now: now()), rec.verdict != .closed,
+                  rec.verdict != .quarantined else { throw UploadEngineError.repeatWindowExpired }
+            let payload = try JSONEncoder().encode(UploadPayload.Recapture(steps: steps, reason: reason))
+            try outbox.enqueue(.recapture, sessionId: sessionId, payload: payload)
+            return
+        }
+        guard let current = record(sessionId) else { return }
+        let batch = current.artefacts.filter { keyIds.contains($0.sealed.keyId) }
+        let items = try outbox.items(sessionId: sessionId)
+        let decoder = JSONDecoder()
+        func localId(_ i: OutboxItem) -> UUID? {
+            guard Self.isArtefactKind(i.kind) else { return nil }
+            return (try? decoder.decode(UploadPayload.Artefact.self, from: i.payload))?.artefactLocalId
+        }
+        let batchLocal = Set(batch.map { $0.localId })
+        var recaptureId = items.first { i in
+            guard i.kind == .recapture, let p = try? decoder.decode(UploadPayload.Recapture.self, from: i.payload),
+                  let ids = p.keyIds else { return false }
+            return !keyIds.isDisjoint(with: ids)
+        }?.id
+        if recaptureId == nil {
+            recaptureId = items.first { $0.kind == .declareArtefact && localId($0).map(batchLocal.contains) == true }?.dependsOn
+        }
+        if recaptureId == nil {
+            let payload = try JSONEncoder().encode(UploadPayload.Recapture(steps: steps, reason: reason,
+                                                                           keyIds: batch.map { $0.sealed.keyId }))
+            recaptureId = try outbox.enqueue(.recapture, sessionId: sessionId, payload: payload).id
+        }
+        for a in batch where a.status != .verified && a.status != .abandoned {
+            let mine = items.filter { localId($0) == a.localId }
+            let payload = try JSONEncoder().encode(UploadPayload.Artefact(artefactLocalId: a.localId))
+            var previous = recaptureId
+            for kind in [OutboxKind.declareArtefact, .uploadArtefact, .completeArtefact] {
+                if let found = mine.first(where: { $0.kind == kind }) {
+                    previous = found.id
+                } else {
+                    previous = try outbox.enqueue(kind, sessionId: sessionId, payload: payload, dependsOn: previous).id
+                }
+            }
+        }
     }
 
     public func enqueueClinicalData(sessionId: UUID, patientId: UUID, request: ClinicalDataRequest) throws {
