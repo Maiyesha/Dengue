@@ -195,6 +195,6 @@ final class ResidualRound2Tests: XCTestCase {
                                        sealed: repeatArts, engine: e)
         XCTAssertNotEqual(outcome, .notQueued)
         XCTAssertTrue(repeatArts.allSatisfy(alive))
-        XCTAssertNotNil(try store.load(session), "held for retry")
+        XCTAssertNotNil(try store.load(PendingHandoff.repeatSlot(for: session)), "held for retry")
     }
 }

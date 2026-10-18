@@ -139,24 +139,32 @@ public final class UploadEngine {
             guard Self.isArtefactKind(i.kind) else { return nil }
             return (try? decoder.decode(UploadPayload.Artefact.self, from: i.payload))?.artefactLocalId
         }
-        let batchLocal = Set(batch.map { $0.localId })
-        var recaptureId = items.first { i in
+        // Round 4: per artefact, the recapture item that already carries it (by key id, or the item its declare
+        // depends on). Every artefact without one (new artefacts, or ones whose recapture write failed) goes into ONE
+        // new recapture item for the whole call, so a mixed batch is a single recapture.
+        let recaptures: [(id: UUID, keyIds: Set<String>)] = items.compactMap { i in
             guard i.kind == .recapture, let p = try? decoder.decode(UploadPayload.Recapture.self, from: i.payload),
-                  let ids = p.keyIds else { return false }
-            return !keyIds.isDisjoint(with: ids)
-        }?.id
-        if recaptureId == nil {
-            recaptureId = items.first { $0.kind == .declareArtefact && localId($0).map(batchLocal.contains) == true }?.dependsOn
+                  let ids = p.keyIds else { return nil }
+            return (i.id, Set(ids))
         }
-        if recaptureId == nil {
-            let payload = try JSONEncoder().encode(UploadPayload.Recapture(steps: steps, reason: reason,
-                                                                           keyIds: batch.map { $0.sealed.keyId }))
-            recaptureId = try outbox.enqueue(.recapture, sessionId: sessionId, payload: payload).id
+        func existingRecapture(_ a: ArtefactUpload) -> UUID? {
+            if let r = recaptures.first(where: { $0.keyIds.contains(a.sealed.keyId) }) { return r.id }
+            return items.first { $0.kind == .declareArtefact && localId($0) == a.localId }?.dependsOn
         }
-        for a in batch where a.status != .verified && a.status != .abandoned {
+        let open = batch.filter { $0.status != .verified && $0.status != .abandoned }
+        let needing = open.filter { existingRecapture($0) == nil }
+        var newRecapture: UUID?
+        if !needing.isEmpty {
+            var names: [CaptureStepName] = []
+            for a in needing where !names.contains(a.step) { names.append(a.step) }
+            let payload = try JSONEncoder().encode(UploadPayload.Recapture(steps: names, reason: reason,
+                                                                           keyIds: needing.map { $0.sealed.keyId }))
+            newRecapture = try outbox.enqueue(.recapture, sessionId: sessionId, payload: payload).id
+        }
+        for a in open {
             let mine = items.filter { localId($0) == a.localId }
             let payload = try JSONEncoder().encode(UploadPayload.Artefact(artefactLocalId: a.localId))
-            var previous = recaptureId
+            var previous = existingRecapture(a) ?? newRecapture
             for kind in [OutboxKind.declareArtefact, .uploadArtefact, .completeArtefact] {
                 if let found = mine.first(where: { $0.kind == kind }) {
                     previous = found.id

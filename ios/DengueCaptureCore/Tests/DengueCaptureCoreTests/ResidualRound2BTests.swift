@@ -131,7 +131,7 @@ final class ResidualRound2BTests: XCTestCase {
         let report = svc.sweep(captureDirectory: dir.appendingPathComponent("capture"), sealedDirectory: sealedDir, engine: e)
         XCTAssertFalse(report.sealedSweepSkipped)
         XCTAssertTrue(repeatArts.allSatisfy(alive), "the repeat-pending record references them")
-        let held = try XCTUnwrap(try FileHeldHandoffStore(directory: heldDir, keys: keys).load(session))
+        let held = try XCTUnwrap(try FileHeldHandoffStore(directory: heldDir, keys: keys).load(PendingHandoff.repeatSlot(for: session)))   // round 4: own slot
         XCTAssertEqual(held.stage, .repeatPending)
         XCTAssertEqual(held.repeatReason, "DS_QG_002")
         XCTAssertEqual(held.repeatAcceptedSteps, [.neutralFace])
@@ -174,7 +174,7 @@ final class ResidualRound2BTests: XCTestCase {
         let svc = try service()
         try svc.closeOpen()
         _ = svc.retryHeld(engine: nil)
-        XCTAssertNotNil(try FileHeldHandoffStore(directory: heldDir, keys: keys).load(session))
+        XCTAssertNotNil(try FileHeldHandoffStore(directory: heldDir, keys: keys).load(PendingHandoff.repeatSlot(for: session)))   // round 4: own slot
         XCTAssertTrue(repeatArts.allSatisfy(alive))
     }
 

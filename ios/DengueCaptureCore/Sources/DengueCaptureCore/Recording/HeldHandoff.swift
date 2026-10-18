@@ -1,4 +1,5 @@
 import Foundation
+import Crypto
 
 /// R-2: a recording stopped because the nurse's session expired before the step minimum. Its video, ROI trace and
 /// metadata are sealed and kept on the phone; the server has no slot for interrupted clips, so it is never uploaded.
@@ -93,6 +94,19 @@ public struct PendingHandoff: Codable, Equatable {
         repeatAcceptedSteps = try c.decodeIfPresent([CaptureStep].self, forKey: .repeatAcceptedSteps)
     }
 
+    /// Round 4: the deterministic store key of a session's repeat hold. Repeat holds live in their own slot (and
+    /// their own memory map), never in the session's hand-off slot (`sessionId`), so neither overwrites the other.
+    public static func repeatSlot(for sessionId: UUID) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data("denguesense.repeat-hold:\(sessionId.uuidString.lowercased())".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x40   // version 4 layout
+        bytes[8] = (bytes[8] & 0x3F) | 0x80   // RFC 4122 variant
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    /// Round 4: the slot this record is stored under (`repeatSlot(for:)` for a repeat hold, else the session id).
+    public var storeKey: UUID { stage == .repeatPending ? Self.repeatSlot(for: sessionId) : sessionId }
+
     /// Every sealed artefact this record references (accepted attempts and interrupted clips).
     public var allSealed: [SealedArtefact] {
         artefacts.map { $0.sealed } + interruptedClips.flatMap { $0.artefacts.map { $0.sealed } }
@@ -145,7 +159,7 @@ public final class FileHeldHandoffStore: HeldHandoffStoring {
 
     public func save(_ p: PendingHandoff) throws {
         lock.lock(); defer { lock.unlock() }
-        let stem = p.sessionId.uuidString.lowercased()
+        let stem = p.storeKey.uuidString.lowercased()   // round 4: a repeat hold has its own slot
         let tmp = directory.appendingPathComponent("\(stem).save.tmp")
         let out = directory.appendingPathComponent("\(stem).\(UUID().uuidString.lowercased()).held")
         let e = JSONEncoder()
@@ -154,8 +168,8 @@ public final class FileHeldHandoffStore: HeldHandoffStoring {
         let sealed: SealedArtefact
         do { sealed = try CaptureHandoff.sealAndRemovePlaintext(input: tmp, output: out, sealer: sealer) }
         catch { try? FileManager.default.removeItem(at: tmp); throw error }
-        let previous = try? ref(p.sessionId)
-        try JSONEncoder().encode(sealed).write(to: refURL(p.sessionId), options: .atomic)
+        let previous = try? ref(p.storeKey)
+        try JSONEncoder().encode(sealed).write(to: refURL(p.storeKey), options: .atomic)
         if let previous { destroy(previous) }
     }
 
@@ -253,6 +267,11 @@ public struct HeldHandoffSummary: Equatable {
     /// R-2: the record only keeps interrupted clips (nothing to send).
     public var isInterruptedOnly = false
 
+    /// Round 4: a repeat hold (its own row, beside the session's own hand-off row).
+    public var isRepeat = false
+    /// Round 4: unique row id (the store slot).
+    public var slotId: UUID { isRepeat ? PendingHandoff.repeatSlot(for: sessionId) : sessionId }
+
     /// R-3: the record still has something to send (or to fix). A clip-only record is listed but needs no action.
     public var needsAction: Bool { !isInterruptedOnly }
 }
@@ -294,6 +313,8 @@ public final class CaptureHandoffService {
     private let lock = NSRecursiveLock()
     /// Holds whose save failed; retried by `retryHeld`.
     private var memoryHolds: [UUID: PendingHandoff] = [:]
+    /// Round 4: repeat holds whose save failed, keyed by session id (separate from `memoryHolds`).
+    private var repeatHolds: [UUID: PendingHandoff] = [:]
     /// Sessions inside `process` right now.
     private var inProgress: [UUID: PendingHandoff] = [:]
     private var wrapper: KeyWrapper?
@@ -348,35 +369,55 @@ public final class CaptureHandoffService {
     }
 
     /// Round 2 (I4): a repeat flow's accepted artefacts, persisted when sign-in becomes required, so a kill under
-    /// the overlay loses nothing (the sweep keeps them; the next `retryHeld` routes the record to `submitRepeat`).
-    /// Interrupted clips already kept for the session are preserved.
+    /// the overlay loses nothing (the sweep keeps them; the next `retryHeld` routes the hold to `submitRepeat`).
     ///
-    /// Round 3: never overwrites a `.session` / `.engineOwned` hand-off of the same session (it is still needed to
-    /// complete that session): the checkpoint is skipped and `repeatCheckpointSkipped` diagnostic returned. Repeated
-    /// calls are idempotent. `isOpen: false` when the repeat is already over (e.g. no upload engine at hand-off).
+    /// Round 4: written to the session's REPEAT slot (`PendingHandoff.repeatSlot(for:)`), so it coexists with the
+    /// session's own hand-off record (any stage). A second repeat UNIONS its artefacts (by sealed key id) and
+    /// accepted steps into the existing repeat hold; nothing is overwritten. Idempotent. A save failure keeps the
+    /// hold in memory (referenced by the sweep, retried by `retryHeld`): returns false.
     @discardableResult
     public func checkpointRepeat(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
                                  accepted: [CaptureStep], sealed: [SealedStepArtefact],
-                                 isOpen: Bool = true) throws -> String? {
+                                 isOpen: Bool = true) throws -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard !sealed.isEmpty else { return nil }
-        let existing = (try? store.load(sessionId)) ?? nil
-        if let existing, existing.stage == .session || existing.stage == .engineOwned {
-            return Self.repeatCheckpointSkipped
-        }
-        var p = PendingHandoff(sessionId: sessionId, patientId: nil, maskedCode: maskedCode, capturedAt: capturedAt,
-                               offline: false, protocolVersion: "", attempts: [], vitals: [], artefacts: sealed,
-                               metadata: nil, isOpen: isOpen, stage: .repeatPending)
-        p.repeatReason = reason
-        p.repeatAcceptedSteps = accepted
-        p.interruptedClips = existing?.interruptedClips ?? []
-        if p == existing { return nil }
-        try store.save(p)
-        return nil
+        guard !sealed.isEmpty else { return true }
+        return saveRepeatHold(sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt, reason: reason,
+                              accepted: accepted, sealed: sealed, isOpen: isOpen)
     }
 
-    /// Round 3: diagnostic of a repeat checkpoint skipped because the session still has a hand-off record.
-    public static let repeatCheckpointSkipped = "REPEAT_CHECKPOINT_SKIPPED_SESSION_HANDOFF"
+    /// The current repeat hold of a session (memory first: it is newer than a failed save).
+    private func loadRepeatHold(_ sessionId: UUID) -> PendingHandoff? {
+        repeatHolds[sessionId] ?? ((try? store.load(PendingHandoff.repeatSlot(for: sessionId))) ?? nil)
+    }
+
+    /// Union-merges into the session's repeat hold and saves it in the repeat slot. False = kept in memory.
+    @discardableResult
+    private func saveRepeatHold(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
+                                accepted: [CaptureStep], sealed: [SealedStepArtefact], isOpen: Bool) -> Bool {
+        let existing = loadRepeatHold(sessionId)
+        var arts = existing?.artefacts ?? []
+        var have = Set(arts.map { $0.sealed.keyId })
+        for a in sealed where have.insert(a.sealed.keyId).inserted { arts.append(a) }
+        var steps = existing?.repeatAcceptedSteps ?? []
+        for st in accepted where !steps.contains(st) { steps.append(st) }
+        var p = PendingHandoff(sessionId: sessionId, patientId: nil,
+                               maskedCode: maskedCode.isEmpty ? (existing?.maskedCode ?? "") : maskedCode,
+                               capturedAt: existing?.capturedAt ?? capturedAt, offline: false, protocolVersion: "",
+                               attempts: [], vitals: [], artefacts: arts, metadata: nil, isOpen: isOpen,
+                               stage: .repeatPending)
+        p.repeatReason = reason
+        p.repeatAcceptedSteps = steps
+        p.interruptedClips = existing?.interruptedClips ?? []
+        if repeatHolds[sessionId] == nil, let existing, existing == p { return true }
+        do {
+            try store.save(p)
+            repeatHolds[sessionId] = nil
+            return true
+        } catch {
+            repeatHolds[sessionId] = p
+            return false
+        }
+    }
 
     /// Session finished: enqueue it, or hold it.
     public func submit(_ p: PendingHandoff, engine: UploadEngine?) -> HandoffOutcome {
@@ -387,6 +428,8 @@ public final class CaptureHandoffService {
     }
 
     /// Retries every closed, readable held hand-off and every in-memory hold (after the R-3 obsolete-record repair).
+    /// Round 4: the session's own record and its repeat hold are retried independently (outcome map: the session
+    /// record's outcome wins when both report).
     public func retryHeld(engine: UploadEngine?) -> [UUID: HandoffOutcome] {
         lock.lock(); defer { lock.unlock() }
         if let engine { removeObsolete(engine: engine) }
@@ -395,20 +438,24 @@ public final class CaptureHandoffService {
         for p in loaded.records where !p.isOpen && p.stage != .interruptedOnly && p.stage != .repeatPending {
             out[p.sessionId] = process(p, original: p, engine: engine)
         }
-        // Round 2 (I4): repeat-pending records go to submitRepeat (window and KMS rules apply there).
-        if let engine {
-            for p in loaded.records where !p.isOpen && p.stage == .repeatPending {
-                if let o = routeRepeat(p, engine: engine) { out[p.sessionId] = o }
-            }
-        }
         for (id, p) in memoryHolds where out[id] == nil {
-            if p.stage == .repeatPending {
-                // Round 3: an in-memory repeat hold goes to submitRepeat, like a stored one.
-                guard let engine else { continue }
-                if let o = routeRepeat(p, engine: engine) { out[id] = o }
-                continue
-            }
             out[id] = process(p, original: nil, engine: engine)
+        }
+        // Repeat holds go to submitRepeat (window and KMS rules apply there).
+        var routed = Set<UUID>()
+        for p in loaded.records where !p.isOpen && p.stage == .repeatPending && repeatHolds[p.sessionId] == nil {
+            routed.insert(p.sessionId)
+            guard let engine else { continue }
+            if let o = routeRepeat(p, engine: engine), out[p.sessionId] == nil { out[p.sessionId] = o }
+        }
+        for (id, p) in repeatHolds where !routed.contains(id) {
+            if let engine {
+                if let o = routeRepeat(p, engine: engine), out[id] == nil { out[id] = o }
+            } else if (try? store.save(p)) != nil {
+                repeatHolds[id] = nil   // persisted now
+            } else if out[id] == nil {
+                out[id] = .holdFailed(.uploadNotConfigured)   // still only in memory: the backoff keeps retrying
+            }
         }
         return out
     }
@@ -428,7 +475,7 @@ public final class CaptureHandoffService {
         lock.lock(); defer { lock.unlock() }
         for var p in try store.loadEach().records where p.isOpen {
             p.isOpen = false
-            try store.save(p)
+            try store.save(p)   // same slot (`storeKey`)
         }
     }
 
@@ -439,21 +486,28 @@ public final class CaptureHandoffService {
     /// the session, or any copy of the hold (memory or store) says `.engineOwned`, the artefacts are kept and only
     /// the held record is removed. Otherwise the session's artefacts are shredded. An unreadable record is removed;
     /// its artefacts, now unreferenced, are reclaimed by the next sweep (which only runs with an engine).
-    public func discard(sessionId: UUID, reason: DiscardReason, engine: UploadEngine?) throws {
+    /// Round 4: `repeatHold: true` discards the session's repeat hold instead (its own row): the artefacts the
+    /// engine has not taken are shredded; the session's own record is untouched.
+    public func discard(sessionId: UUID, reason: DiscardReason, engine: UploadEngine?, repeatHold: Bool = false) throws {
         lock.lock(); defer { lock.unlock() }
+        if repeatHold {
+            let held = [repeatHolds.removeValue(forKey: sessionId),
+                        (try? store.load(PendingHandoff.repeatSlot(for: sessionId))) ?? nil].compactMap { $0 }
+            let engineKeys = Set(engine?.record(sessionId)?.artefacts.map { $0.sealed.keyId } ?? [])
+            var seen = Set<String>()
+            for a in held.flatMap({ $0.artefacts + $0.interruptedClips.flatMap { $0.artefacts } })
+                where !engineKeys.contains(a.sealed.keyId) && seen.insert(a.sealed.keyId).inserted {
+                destroy(a.sealed)
+            }
+            try store.remove(PendingHandoff.repeatSlot(for: sessionId))
+            return
+        }
         let memory = memoryHolds.removeValue(forKey: sessionId)
         let stored = try? store.load(sessionId)
         let engineOwned = engine?.record(sessionId) != nil
             || memory?.stage == .engineOwned || stored?.stage == .engineOwned
             || memory?.stage == .interruptedOnly || stored?.stage == .interruptedOnly
         var seen = Set<String>()
-        // Round 2 (I4): a repeat-pending record owns the artefacts the engine has not taken yet.
-        let engineKeys = Set(engine?.record(sessionId)?.artefacts.map { $0.sealed.keyId } ?? [])
-        for p in [memory, stored].compactMap({ $0 }) where p.stage == .repeatPending {
-            for a in p.artefacts where !engineKeys.contains(a.sealed.keyId) && seen.insert(a.sealed.keyId).inserted {
-                destroy(a.sealed)
-            }
-        }
         if !engineOwned {
             for a in (memory?.artefacts ?? []) + (stored?.artefacts ?? []) where seen.insert(a.sealed.keyId).inserted {
                 destroy(a.sealed)
@@ -477,18 +531,22 @@ public final class CaptureHandoffService {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
                                isOpen: $0.isOpen, isUnreadable: false, capturedAt: $0.capturedAt,
                                interruptedClipCount: $0.interruptedClips.count,
-                               isInterruptedOnly: $0.stage == .interruptedOnly)
+                               isInterruptedOnly: $0.stage == .interruptedOnly, isRepeat: $0.stage == .repeatPending)
         }
         out += loaded.unreadable.map {
             HeldHandoffSummary(sessionId: $0, maskedCode: "", diagnostic: "HELD_RECORD_UNREADABLE", isOpen: false,
                                isUnreadable: true)
         }
-        let known = Set(out.map { $0.sessionId })
+        let known = Set(out.map { $0.slotId })
         out += memoryHolds.values.filter { !known.contains($0.sessionId) }.map {
             HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
                                isOpen: false, isUnreadable: false, capturedAt: $0.capturedAt,
                                interruptedClipCount: $0.interruptedClips.count,
                                isInterruptedOnly: $0.stage == .interruptedOnly)
+        }
+        out += repeatHolds.values.filter { !known.contains(PendingHandoff.repeatSlot(for: $0.sessionId)) }.map {
+            HeldHandoffSummary(sessionId: $0.sessionId, maskedCode: $0.maskedCode, diagnostic: $0.diagnostic,
+                               isOpen: $0.isOpen, isUnreadable: false, capturedAt: $0.capturedAt, isRepeat: true)
         }
         return out
     }
@@ -505,6 +563,10 @@ public final class CaptureHandoffService {
     /// (`repeatWindowExpired`), no KMS key (`kmsKeyMissing`), nothing accepted, or the server's attempts for the
     /// steps are used up. Any other error holds them (`.repeatPending` record, retried) and destroys nothing; and
     /// nothing is ever destroyed once the engine record references the artefacts.
+    ///
+    /// Round 4: one `enqueueRecapture` call for the whole batch (repair of what the engine already took + the new
+    /// artefacts), so attempt numbering cannot clash. The hold lives in the session's repeat slot; settling it
+    /// removes only the artefacts this call settled (a second repeat's artefacts stay held).
     public func submitRepeat(sessionId: UUID, reason: String, accepted: [CaptureStep], sealed input: [SealedStepArtefact],
                              engine: UploadEngine, maskedCode: String? = nil,
                              capturedAt: Date? = nil) -> RepeatHandoffOutcome {
@@ -519,95 +581,83 @@ public final class CaptureHandoffService {
         defer { removeObsolete(engine: engine, only: sessionId) }
         // Round 3: identity by sealed key id. Artefacts the engine record already references belong to the engine:
         // they are only repaired (missing outbox items re-queued), never queued again and never destroyed here.
-        let owned = Set(engine.record(sessionId)?.artefacts.map { $0.sealed.keyId } ?? [])
+        let rec = engine.record(sessionId)
+        let owned = Set(rec?.artefacts.map { $0.sealed.keyId } ?? [])
         let taken = sealed.filter { owned.contains($0.sealed.keyId) }
         let mine = sealed.filter { !owned.contains($0.sealed.keyId) }
+        let settledKeys = Set(sealed.map { $0.sealed.keyId })
         func hold() -> RepeatHandoffOutcome {
-            let rec = engine.record(sessionId)
-            var p = PendingHandoff(sessionId: sessionId, patientId: nil,
-                                   maskedCode: maskedCode ?? rec?.maskedCode ?? "",
-                                   capturedAt: capturedAt ?? rec?.capturedAt ?? Date(), offline: false,
-                                   protocolVersion: "", attempts: [], vitals: [], artefacts: sealed, metadata: nil,
-                                   isOpen: false, stage: .repeatPending)
-            p.repeatReason = reason
-            p.repeatAcceptedSteps = accepted
-            let existing = (try? store.load(sessionId)) ?? nil
-            p.interruptedClips = existing?.interruptedClips ?? memoryHolds[sessionId]?.interruptedClips ?? []
-            if let existing, existing.stage == .session || existing.stage == .engineOwned {
-                memoryHolds[sessionId] = p   // never overwrite a session hand-off; kept in memory and retried
-                return .held
-            }
-            if (try? store.save(p)) == nil { memoryHolds[sessionId] = p } else { memoryHolds[sessionId] = nil }
+            saveRepeatHold(sessionId: sessionId, maskedCode: maskedCode ?? rec?.maskedCode ?? "",
+                           capturedAt: capturedAt ?? rec?.capturedAt ?? Date(), reason: reason, accepted: accepted,
+                           sealed: sealed, isOpen: false)
             return .held
         }
         func giveUp() -> RepeatHandoffOutcome {
             for a in mine { destroy(a.sealed) }   // never an artefact the engine owns
-            finishRepeatRecord(sessionId)
+            finishRepeatRecord(sessionId, settled: settledKeys)
             return taken.isEmpty ? .notQueued : .enqueued
         }
-        func names(_ arts: [SealedStepArtefact]) -> [CaptureStepName] {
-            var out: [CaptureStepName] = []
-            for a in arts { if let n = CaptureStepName(rawValue: a.step.rawValue), !out.contains(n) { out.append(n) } }
-            return out
-        }
-        if !taken.isEmpty {
-            do {
-                try engine.enqueueRecapture(sessionId: sessionId, steps: names(taken), reason: reason,
-                                            artefacts: taken.compactMap { a in
-                                                CaptureStepName(rawValue: a.step.rawValue).map {
-                                                    ArtefactUpload(step: $0, attempt: a.attempt, kind: a.kind,
-                                                                   deviceVerdict: .accept, sealed: a.sealed)
-                                                }
-                                            })
-            } catch {
-                return hold()   // repair failed: keep the record and retry
+        func upload(_ a: SealedStepArtefact, attempt: Int) -> ArtefactUpload? {
+            CaptureStepName(rawValue: a.step.rawValue).map {
+                ArtefactUpload(step: $0, attempt: attempt, kind: a.kind, deviceVerdict: .accept, sealed: a.sealed)
             }
         }
+        let takenUploads = taken.compactMap { upload($0, attempt: $0.attempt) }   // identity by key id: repaired
         let acceptedMine = mine.filter { accepted.contains($0.step) }
-        if acceptedMine.isEmpty {
-            if taken.isEmpty { return giveUp() }   // nothing accepted at all
-            for a in mine { destroy(a.sealed) }    // rejected attempts of the repeat: never uploaded
-            finishRepeatRecord(sessionId)
-            return .enqueued
-        }
-        guard engine.record(sessionId) != nil else { return hold() }   // unknown to the engine: keep, retry
-        var uploads: [ArtefactUpload] = []
-        var steps: [CaptureStepName] = []
+        if !acceptedMine.isEmpty, rec == nil { return hold() }   // unknown to the engine: keep, retry
+        var mineUploads: [ArtefactUpload] = []
         for a in acceptedMine {
             guard let name = CaptureStepName(rawValue: a.step.rawValue),
-                  let attempt = engine.recaptureAttempt(sessionId: sessionId, step: name) else { continue }
-            if !steps.contains(name) { steps.append(name) }
-            uploads.append(ArtefactUpload(step: name, attempt: attempt, kind: a.kind, deviceVerdict: .accept,
-                                          sealed: a.sealed))
+                  let attempt = engine.recaptureAttempt(sessionId: sessionId, step: name),
+                  let u = upload(a, attempt: attempt) else { continue }   // nil: attempts used up for the step
+            mineUploads.append(u)
         }
-        guard !uploads.isEmpty else { return giveUp() }   // the server's attempts for these steps are used up
+        let batch = takenUploads + mineUploads
+        guard !batch.isEmpty else { return giveUp() }   // nothing accepted, or the server's attempts are used up
+        var steps: [CaptureStepName] = []
+        for u in batch where !steps.contains(u.step) { steps.append(u.step) }
         do {
-            try engine.enqueueRecapture(sessionId: sessionId, steps: steps, reason: reason, artefacts: uploads)
-        } catch UploadEngineError.repeatWindowExpired {
-            return giveUp()
-        } catch UploadEngineError.kmsKeyMissing {
+            try engine.enqueueRecapture(sessionId: sessionId, steps: steps, reason: reason, artefacts: batch)
+        } catch let e as UploadEngineError where e == .repeatWindowExpired || e == .kmsKeyMissing {
+            // The new artefacts can never be queued; what the engine already took is still repaired.
+            if !takenUploads.isEmpty {
+                do {
+                    try engine.enqueueRecapture(sessionId: sessionId, steps: steps, reason: reason, artefacts: takenUploads)
+                } catch {
+                    return hold()
+                }
+            }
             return giveUp()
         } catch {
             return hold()   // e.g. the outbox write failed: enqueueRecapture repairs it on the next retry
         }
-        let used = Set(uploads.map { $0.sealed.keyId })
-        for a in mine where !used.contains(a.sealed.keyId) { destroy(a.sealed) }
-        finishRepeatRecord(sessionId)
+        let used = Set(batch.map { $0.sealed.keyId })
+        for a in mine where !used.contains(a.sealed.keyId) { destroy(a.sealed) }   // rejected / exhausted steps
+        finishRepeatRecord(sessionId, settled: settledKeys)
         return .enqueued
     }
 
-    /// The repeat is settled: its `.repeatPending` record goes (kept as clip-only if it holds interrupted clips).
-    private func finishRepeatRecord(_ sessionId: UUID) {
-        memoryHolds[sessionId] = nil
-        guard let p = (try? store.load(sessionId)) ?? nil, p.stage == .repeatPending else { return }
-        if p.interruptedClips.isEmpty {
-            try? store.remove(sessionId)
+    /// Round 4: the artefacts in `settled` are queued or given up: they leave the session's repeat hold (memory
+    /// and the repeat slot). The hold is removed once empty; other artefacts (a second repeat) stay held. Clips of a
+    /// legacy repeat hold move to the session's own slot. The session's own record is never touched.
+    private func finishRepeatRecord(_ sessionId: UUID, settled: Set<String>) {
+        guard var p = loadRepeatHold(sessionId) else { return }
+        p.artefacts.removeAll { settled.contains($0.sealed.keyId) }
+        if let steps = p.repeatAcceptedSteps {
+            p.repeatAcceptedSteps = steps.filter { st in p.artefacts.contains { $0.step == st } }
+        }
+        let clips = p.interruptedClips
+        p.interruptedClips = []
+        for c in clips {
+            try? keepInterruptedClip(c, sessionId: sessionId, maskedCode: p.maskedCode, capturedAt: p.capturedAt)
+        }
+        if p.artefacts.isEmpty {
+            repeatHolds[sessionId] = nil
+            try? store.remove(PendingHandoff.repeatSlot(for: sessionId))
+        } else if (try? store.save(p)) != nil {
+            repeatHolds[sessionId] = nil
         } else {
-            var q = p
-            q.stage = .interruptedOnly
-            q.artefacts = []
-            q.isOpen = false
-            try? store.save(q)
+            repeatHolds[sessionId] = p
         }
     }
 
@@ -815,6 +865,7 @@ public final class CaptureHandoffService {
         let referenced = owned
             + loaded.records.flatMap { $0.allSealed }       // R-2: including interrupted clips
             + memoryHolds.values.flatMap { $0.allSealed }
+            + repeatHolds.values.flatMap { $0.allSealed }   // round 4: in-memory repeat holds
             + inProgress.values.flatMap { $0.allSealed }
         let names = Set(referenced.map { $0.path.lastPathComponent })
         for name in (try? fm.contentsOfDirectory(atPath: sealedDirectory.path)) ?? [] where !names.contains(name) {

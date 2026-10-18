@@ -123,14 +123,14 @@ final class ResidualRound3Tests: XCTestCase {
         XCTAssertEqual(svc.submitRepeat(sessionId: session, reason: "DS_QG_002", accepted: [.neutralFace],
                                         sealed: repeatArts, engine: e, maskedCode: "\u{2022}\u{2022}417",
                                         capturedAt: now), .held)
-        XCTAssertNotNil(try store.load(session), "kept for retry even though the engine record has the artefacts")
+        XCTAssertNotNil(try store.load(PendingHandoff.repeatSlot(for: session)), "kept for retry even though the engine record has the artefacts")
         obStore.failKinds = []
         XCTAssertEqual(svc.retryHeld(engine: e)[session], .enqueued)
         XCTAssertEqual(try count(ob, session, .recapture), 1)
         XCTAssertEqual(try count(ob, session, .declareArtefact), 6, "the recapture's chains were re-queued")
         XCTAssertEqual(try count(ob, session, .completeArtefact), 6)
         XCTAssertEqual(e.record(session)?.artefacts.count, 6)
-        XCTAssertNil(try store.load(session))
+        XCTAssertNil(try store.load(PendingHandoff.repeatSlot(for: session)))
     }
 
     func testEnqueueRecaptureIsIdempotentBySealedKeyId() throws {
