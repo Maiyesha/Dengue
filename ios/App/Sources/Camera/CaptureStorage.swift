@@ -113,10 +113,19 @@ final class CaptureStorage: @unchecked Sendable {
     }
 
     /// Round 2 (I4): a repeat flow's accepted artefacts while sign-in is required (`.repeatPending`).
+    /// Round 4: written to the session's own repeat slot. If it cannot be saved, the core keeps it in memory
+    /// (referenced by the sweep) and the existing holdFailed backoff retries it: never dropped.
     func checkpointRepeat(sessionId: UUID, maskedCode: String, capturedAt: Date, reason: String,
                           accepted: [CaptureStep], sealed: [SealedStepArtefact], isOpen: Bool = true) {
-        try? handoffs.checkpointRepeat(sessionId: sessionId, maskedCode: maskedCode, capturedAt: capturedAt,
-                                       reason: reason, accepted: accepted, sealed: sealed, isOpen: isOpen)
+        let persisted: Bool
+        do {
+            persisted = try handoffs.checkpointRepeat(sessionId: sessionId, maskedCode: maskedCode,
+                                                      capturedAt: capturedAt, reason: reason, accepted: accepted,
+                                                      sealed: sealed, isOpen: isOpen)
+        } catch {
+            persisted = false
+        }
+        if !persisted { scheduleRetry() }
     }
 
     @discardableResult
@@ -151,9 +160,9 @@ final class CaptureStorage: @unchecked Sendable {
     func heldSummaries() -> [HeldHandoffSummary] { (try? handoffs.heldSummaries(engine: engine)) ?? [] }
 
     /// Explicit nurse discard (or consent stop / quarantine): the only path that shreds a held session.
-    func discard(_ sessionId: UUID, reason: DiscardReason) {
+    func discard(_ sessionId: UUID, reason: DiscardReason, repeatHold: Bool = false) {
         // Ownership is decided from the engine: never shred what the upload engine has registered.
-        try? handoffs.discard(sessionId: sessionId, reason: reason, engine: engine)
+        try? handoffs.discard(sessionId: sessionId, reason: reason, engine: engine, repeatHold: repeatHold)
     }
 
     /// C1: wraps data keys that were sealed before a KMS key was configured (repeat hand-off).

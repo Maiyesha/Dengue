@@ -32,7 +32,7 @@ struct OutboxView: View {
                         Text(NurseCopy.outboxEmpty)
                     }
                     ForEach(sessions, id: \.sessionId) { s in sessionRow(s) }
-                    ForEach(held, id: \.sessionId) { h in heldRow(h) }
+                    ForEach(held, id: \.slotId) { h in heldRow(h) }   // round 4: a repeat hold is its own row
                 }
                 .padding()
             }
@@ -48,7 +48,9 @@ struct OutboxView: View {
                 let target = pendingDelete
                 pendingDelete = nil
                 Task.detached(priority: .userInitiated) {
-                    if let target { CaptureStorage.shared?.discard(target.sessionId, reason: .nurseDiscard) }
+                    if let target {
+                        CaptureStorage.shared?.discard(target.sessionId, reason: .nurseDiscard, repeatHold: target.isRepeat)
+                    }
                     let summaries = CaptureStorage.shared?.heldSummaries() ?? []
                     await MainActor.run { held = summaries }
                 }
