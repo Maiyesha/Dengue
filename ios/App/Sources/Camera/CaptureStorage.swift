@@ -102,6 +102,16 @@ final class CaptureStorage: @unchecked Sendable {
 
     func checkpoint(_ p: PendingHandoff) { try? handoffs.checkpoint(p) }
 
+    /// Round 5: a repeat hand-off outcome joins the same handling: drain when queued, and the hold-failed backoff
+    /// when the repeat hold exists only in memory.
+    func handle(repeatOutcome o: RepeatHandoffOutcome) {
+        switch o {
+        case .enqueued: handle([HandoffOutcome.enqueued])
+        case .holdFailed: handle([HandoffOutcome.holdFailed(.enqueueFailed("REPEAT_PENDING"))])
+        case .held, .notQueued: break
+        }
+    }
+
     /// R-2: sign-in required during capture: persist the session's accepted attempts now (core rule).
     func checkpointForReauth(_ p: PendingHandoff) { try? handoffs.checkpointForReauth(p) }
 

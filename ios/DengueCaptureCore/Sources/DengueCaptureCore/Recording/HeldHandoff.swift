@@ -286,6 +286,9 @@ public enum RepeatHandoffOutcome: Equatable {
     /// Nothing could be queued (window passed, nothing accepted, no KMS key...): the repeat's artefacts were
     /// destroyed (the session itself is already on the server).
     case notQueued
+    /// Round 5: held, but the hold could not be persisted: it exists only in memory (referenced by the sweep). The
+    /// caller must start the hold-failed backoff, or a kill loses the recordings.
+    case holdFailed
 }
 
 public struct SweepReport: Equatable {
@@ -443,18 +446,24 @@ public final class CaptureHandoffService {
         }
         // Repeat holds go to submitRepeat (window and KMS rules apply there).
         var routed = Set<UUID>()
+        // Round 5: a `.holdFailed` (something exists only in memory) always wins in the merged outcome, so the
+        // app's backoff never stops while a repeat hold is unpersisted.
+        func merge(_ id: UUID, _ o: HandoffOutcome) {
+            if case .holdFailed = o { out[id] = o } else if out[id] == nil { out[id] = o }
+        }
         for p in loaded.records where !p.isOpen && p.stage == .repeatPending && repeatHolds[p.sessionId] == nil {
             routed.insert(p.sessionId)
             guard let engine else { continue }
-            if let o = routeRepeat(p, engine: engine), out[p.sessionId] == nil { out[p.sessionId] = o }
+            if let o = routeRepeat(p, engine: engine) { merge(p.sessionId, o) }
         }
-        for (id, p) in repeatHolds where !routed.contains(id) {
+        // Round 5: an open repeat hold belongs to a repeat that is still recording: never submitted mid-flow.
+        for (id, p) in repeatHolds where !routed.contains(id) && !p.isOpen {
             if let engine {
-                if let o = routeRepeat(p, engine: engine), out[id] == nil { out[id] = o }
+                if let o = routeRepeat(p, engine: engine) { merge(id, o) }
             } else if (try? store.save(p)) != nil {
                 repeatHolds[id] = nil   // persisted now
-            } else if out[id] == nil {
-                out[id] = .holdFailed(.uploadNotConfigured)   // still only in memory: the backoff keeps retrying
+            } else {
+                merge(id, .holdFailed(.uploadNotConfigured))   // still only in memory: the backoff keeps retrying
             }
         }
         return out
@@ -466,6 +475,7 @@ public final class CaptureHandoffService {
                             maskedCode: p.maskedCode, capturedAt: p.capturedAt) {
         case .enqueued: return .enqueued
         case .held: return .held(.enqueueFailed("REPEAT_PENDING"))
+        case .holdFailed: return .holdFailed(.enqueueFailed("REPEAT_PENDING"))   // round 5: only in memory
         case .notQueued: return nil
         }
     }
@@ -587,10 +597,10 @@ public final class CaptureHandoffService {
         let mine = sealed.filter { !owned.contains($0.sealed.keyId) }
         let settledKeys = Set(sealed.map { $0.sealed.keyId })
         func hold() -> RepeatHandoffOutcome {
-            saveRepeatHold(sessionId: sessionId, maskedCode: maskedCode ?? rec?.maskedCode ?? "",
-                           capturedAt: capturedAt ?? rec?.capturedAt ?? Date(), reason: reason, accepted: accepted,
-                           sealed: sealed, isOpen: false)
-            return .held
+            let persisted = saveRepeatHold(sessionId: sessionId, maskedCode: maskedCode ?? rec?.maskedCode ?? "",
+                                           capturedAt: capturedAt ?? rec?.capturedAt ?? Date(), reason: reason,
+                                           accepted: accepted, sealed: sealed, isOpen: false)
+            return persisted ? .held : .holdFailed   // round 5: an unpersisted hold must start the backoff
         }
         func giveUp() -> RepeatHandoffOutcome {
             for a in mine { destroy(a.sealed) }   // never an artefact the engine owns

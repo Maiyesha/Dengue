@@ -555,7 +555,7 @@ final class FlowCoordinator: ObservableObject {
             let outcome = storage.handoffs.submitRepeat(sessionId: r.sessionId, reason: reason, accepted: accepted,
                                                         sealed: sealed, engine: engine, maskedCode: r.maskedCode,
                                                         capturedAt: captured)
-            if outcome == .enqueued { UploadCoordinator.shared?.drainSoon() }
+            storage.handle(repeatOutcome: outcome)   // round 5: drain, or start the hold-failed backoff
         }
     }
 }
