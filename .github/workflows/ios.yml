@@ -1,0 +1,25 @@
+name: ios
+on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+jobs:
+  core:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core package tests
+        working-directory: ios/DengueCaptureCore
+        run: swift test
+  app:
+    runs-on: macos-15
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: App tests
+        working-directory: ios/App
+        run: |
+          brew install xcodegen
+          xcodegen
+          xcodebuild test -scheme DengueCapture -destination 'platform=iOS Simulator,name=iPhone 16'

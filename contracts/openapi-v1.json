@@ -1,0 +1,3812 @@
+{
+  "components": {
+    "parameters": {
+      "IdempotencyKey": {
+        "description": "UUID v4. Same key and payload replays the stored response; same key with a different payload is 409 DS_IDEMPOTENCY_001. Kept 24 h.",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "ErrorCode": {
+        "description": "Stable machine-readable error code; clients dispatch on this.",
+        "enum": [
+          "DS_AUD_001",
+          "DS_AUD_002",
+          "DS_AUTH_001",
+          "DS_AUTH_002",
+          "DS_AUTH_003",
+          "DS_CLINICAL_001",
+          "DS_DEVICE_001",
+          "DS_DEVICE_002",
+          "DS_DEVICE_003",
+          "DS_DEVICE_004",
+          "DS_DEVICE_005",
+          "DS_IDEMPOTENCY_001",
+          "DS_IDEMPOTENCY_002",
+          "DS_IDEMPOTENCY_003",
+          "DS_INTERNAL_001",
+          "DS_NOT_FOUND",
+          "DS_QG_000",
+          "DS_QG_099",
+          "DS_RATE_001",
+          "DS_REG_001",
+          "DS_REG_002",
+          "DS_SCAN_001",
+          "DS_SCAN_002",
+          "DS_STATE_001",
+          "DS_STATE_002",
+          "DS_STATE_003",
+          "DS_UPLOAD_001",
+          "DS_UPLOAD_002",
+          "DS_UPLOAD_003",
+          "DS_UPLOAD_004",
+          "DS_UPLOAD_005",
+          "DS_VALIDATION_001",
+          "DS_VALIDATION_002"
+        ],
+        "type": "string"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/ErrorCode"
+              },
+              "detail": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "message": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "timestamp": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                "type": "string"
+              },
+              "trace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "detail",
+              "request_id",
+              "trace_id",
+              "timestamp"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "deviceBearer": {
+        "bearerFormat": "JWT",
+        "description": "Device token (aud \"device-upload\", claims device_id and site_id, 24 h). Callable only on artefact routes, GET /v1/scans/{id} and POST /v1/devices/push-token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "userBearer": {
+        "bearerFormat": "JWT",
+        "description": "User access JWT (RS256, 15 min). Claims: sub, roles, site_id, deidentify, jti.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Phase A contact-free capture API. All routes are under /v1; errors use the envelope {error:{code,message,detail,request_id,trace_id,timestamp}}.",
+    "title": "DengueSense API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "const": "alive",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [],
+        "summary": "Liveness probe",
+        "tags": [
+          "system"
+        ],
+        "x-auth": "none"
+      }
+    },
+    "/v1/artefacts/{id}/complete": {
+      "post": {
+        "operationId": "completeArtefact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "const": "received_verified",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
+          },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          },
+          {
+            "deviceBearer": []
+          }
+        ],
+        "summary": "Complete the upload and verify sha256; may trigger the quality gate",
+        "tags": [
+          "artefacts"
+        ],
+        "x-auth": "user_or_device",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/artefacts/{id}/parts/{n}/url": {
+      "post": {
+        "operationId": "getArtefactPartUrl",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "expires_in": {
+                      "const": 900,
+                      "type": "number"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "expires_in"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          },
+          {
+            "deviceBearer": []
+          }
+        ],
+        "summary": "Pre-signed URL for one upload part (valid 900 s; no Idempotency-Key, every call returns a fresh URL)",
+        "tags": [
+          "artefacts"
+        ],
+        "x-auth": "user_or_device",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/devices/assert": {
+      "post": {
+        "description": "Authentication is optional. With a user bearer token (admin or clinician with a site): enrolment flow, challenge issued by POST /v1/devices/challenge. Without a token: renewal flow, challenge issued by POST /v1/devices/{id}/renewal-challenge; the App Attest assertion is the credential. An invalid token is 401, never a fall-through to renewal. Exempt from Idempotency-Key: the response is a live bearer credential and is never stored.",
+        "operationId": "assertDevice",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "assertion": {
+                    "maxLength": 21848,
+                    "minLength": 4,
+                    "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$",
+                    "type": "string"
+                  },
+                  "challenge": {
+                    "maxLength": 44,
+                    "minLength": 4,
+                    "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$",
+                    "type": "string"
+                  },
+                  "device_id": {
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "device_id",
+                  "assertion",
+                  "challenge"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device_token": {
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "const": 86400,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "device_token",
+                    "expires_in"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {},
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Exchange an App Attest assertion for a 24 h device token",
+        "tags": [
+          "devices"
+        ],
+        "x-auth": "optional_user",
+        "x-roles": [
+          "admin",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/devices/attest": {
+      "post": {
+        "operationId": "attestDevice",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "attestation": {
+                    "maxLength": 87384,
+                    "minLength": 4,
+                    "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$",
+                    "type": "string"
+                  },
+                  "challenge": {
+                    "maxLength": 44,
+                    "minLength": 4,
+                    "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$",
+                    "type": "string"
+                  },
+                  "key_id": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "ward_id": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key_id",
+                  "attestation",
+                  "challenge",
+                  "ward_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "device_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "device_id"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Enrol a device from an App Attest attestation",
+        "tags": [
+          "devices"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "admin",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/devices/challenge": {
+      "post": {
+        "operationId": "createDeviceChallenge",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "challenge": {
+                      "description": "32 random bytes, standard base64",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "challenge"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Issue an App Attest enrolment challenge",
+        "tags": [
+          "devices"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "admin",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/devices/push-token": {
+      "post": {
+        "operationId": "registerPushToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "apns_token": {
+                    "pattern": "^[0-9a-fA-F]{64,200}$",
+                    "type": "string"
+                  },
+                  "device_id": {
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "device_id",
+                  "apns_token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Success (no content)"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "deviceBearer": []
+          }
+        ],
+        "summary": "Register the APNs push token of the calling device",
+        "tags": [
+          "devices"
+        ],
+        "x-auth": "device"
+      }
+    },
+    "/v1/devices/{id}/renewal-challenge": {
+      "post": {
+        "description": "No authentication. Exempt from Idempotency-Key. Unknown or revoked devices are 404.",
+        "operationId": "createRenewalChallenge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "challenge": {
+                      "description": "32 random bytes, standard base64",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "challenge"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited (DS_RATE_001)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [],
+        "summary": "Issue a token-renewal challenge for an active device (no authentication)",
+        "tags": [
+          "devices"
+        ],
+        "x-auth": "none"
+      }
+    },
+    "/v1/patients/lookup": {
+      "get": {
+        "operationId": "lookupPatient",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "participant_code",
+            "required": true,
+            "schema": {
+              "pattern": "^DS-[A-Z]+-[0-9]{5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bed_label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "last_captured_at": {
+                      "anyOf": [
+                        {
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "participant_code": {
+                      "type": "string"
+                    },
+                    "patient_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "ward_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "patient_id",
+                    "participant_code",
+                    "bed_label",
+                    "ward_id",
+                    "last_captured_at"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Find a patient by participant code",
+        "tags": [
+          "patients"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/patients/{id}/clinical-data": {
+      "post": {
+        "operationId": "submitClinicalData",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "labs": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "collected_at": {
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                          "type": "string"
+                        },
+                        "id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "methodology": {
+                          "maxLength": 200,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "test": {
+                          "enum": [
+                            "haemoglobin",
+                            "haematocrit",
+                            "wbc_count",
+                            "platelet_count"
+                          ],
+                          "type": "string"
+                        },
+                        "unit": {
+                          "description": "Fixed per test (exact string): haemoglobin: \"g/dL\", haematocrit: \"%\", wbc_count: \"10^9/L\", platelet_count: \"10^9/L\"",
+                          "maxLength": 32,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "test",
+                        "value",
+                        "unit",
+                        "collected_at",
+                        "methodology"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 500,
+                    "type": "array"
+                  },
+                  "observations": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "measured_at": {
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                          "type": "string"
+                        },
+                        "observation_id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "scan_client_session_id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "source_device_type": {
+                          "maxLength": 100,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "unit": {
+                          "description": "Fixed per vital (exact string): hr: \"/min\", spo2: \"%\", sbp: \"mmHg\", dbp: \"mmHg\", temp_c: \"°C\", rr: \"/min\", crt_s: \"s\"",
+                          "maxLength": 32,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "number"
+                        },
+                        "vital": {
+                          "enum": [
+                            "hr",
+                            "spo2",
+                            "sbp",
+                            "dbp",
+                            "temp_c",
+                            "rr",
+                            "crt_s"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "observation_id",
+                        "vital",
+                        "value",
+                        "unit",
+                        "source_device_type",
+                        "measured_at"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 500,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "observations"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "accepted": {
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "duplicates": {
+                      "maximum": 9007199254740991,
+                      "minimum": -9007199254740991,
+                      "type": "integer"
+                    },
+                    "invalid": {
+                      "description": "observation_ids stored but flagged INVALID (out of physiological range)",
+                      "items": {
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "duplicates",
+                    "invalid"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Submit reference vitals and labs (idempotent per id)",
+        "tags": [
+          "clinical"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ],
+        "x-units": {
+          "labs": {
+            "haematocrit": "%",
+            "haemoglobin": "g/dL",
+            "platelet_count": "10^9/L",
+            "wbc_count": "10^9/L"
+          },
+          "vitals": {
+            "crt_s": "s",
+            "dbp": "mmHg",
+            "hr": "/min",
+            "rr": "/min",
+            "sbp": "mmHg",
+            "spo2": "%",
+            "temp_c": "°C"
+          }
+        }
+      }
+    },
+    "/v1/patients/{id}/consent-status": {
+      "get": {
+        "operationId": "getConsentStatus",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "block_code": {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "DS_REG_001",
+                            "DS_REG_002"
+                          ],
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "451 code a capture would get now; null when capture is allowed"
+                    },
+                    "capture_allowed": {
+                      "description": "Same rule as the capture gate: true only when block_code is null",
+                      "type": "boolean"
+                    },
+                    "checked_at": {
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "type": "string"
+                    },
+                    "consent_version": {
+                      "type": "string"
+                    },
+                    "current_version": {
+                      "type": "string"
+                    },
+                    "primary_research": {
+                      "type": "boolean"
+                    },
+                    "withdrawn": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "primary_research",
+                    "consent_version",
+                    "current_version",
+                    "withdrawn",
+                    "capture_allowed",
+                    "block_code",
+                    "checked_at"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Current consent status of a patient",
+        "tags": [
+          "patients"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans": {
+      "post": {
+        "operationId": "createScan",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "capture_steps": {
+                    "items": {
+                      "enum": [
+                        "neutral_face",
+                        "fingertip_ppg",
+                        "ocular_capture",
+                        "dorsal_tongue"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 4,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "captured_at": {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                    "type": "string"
+                  },
+                  "client_session_id": {
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  },
+                  "device_attempts": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "attempt": {
+                          "maximum": 3,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "device_verdict": {
+                          "enum": [
+                            "ACCEPT",
+                            "RECAPTURE",
+                            "UNABLE_TO_ACQUIRE"
+                          ],
+                          "type": "string"
+                        },
+                        "reason_codes": {
+                          "items": {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 32,
+                          "type": "array"
+                        },
+                        "step": {
+                          "enum": [
+                            "neutral_face",
+                            "fingertip_ppg",
+                            "ocular_capture",
+                            "dorsal_tongue"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "step",
+                        "attempt",
+                        "device_verdict",
+                        "reason_codes"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 12,
+                    "type": "array"
+                  },
+                  "metadata": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "ambient_humidity_pct": {
+                        "maximum": 100,
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "ambient_temp_c": {
+                        "type": "number"
+                      },
+                      "angle_deg": {
+                        "maximum": 90,
+                        "minimum": -90,
+                        "type": "number"
+                      },
+                      "camera_model": {
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "distance_cm": {
+                        "maximum": 300,
+                        "minimum": 5,
+                        "type": "number"
+                      },
+                      "exposure": {
+                        "type": "number"
+                      },
+                      "exposure_duration_ms": {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      },
+                      "frame_rate": {
+                        "maximum": 240,
+                        "minimum": 20,
+                        "type": "number"
+                      },
+                      "lighting_lux": {
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "lighting_type": {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "mount": {
+                        "enum": [
+                          "handheld",
+                          "holder"
+                        ],
+                        "type": "string"
+                      },
+                      "resolution": {
+                        "pattern": "^[0-9]+x[0-9]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "camera_model",
+                      "frame_rate",
+                      "resolution",
+                      "exposure",
+                      "mount",
+                      "lighting_type",
+                      "exposure_duration_ms"
+                    ],
+                    "type": "object"
+                  },
+                  "offline": {
+                    "type": "boolean"
+                  },
+                  "patient_id": {
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  },
+                  "protocol_version": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "client_session_id",
+                  "patient_id",
+                  "captured_at",
+                  "offline",
+                  "protocol_version",
+                  "capture_steps",
+                  "device_attempts",
+                  "metadata"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "scan": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "client_session_id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "capture_pending",
+                            "quality_pending",
+                            "quality_passed",
+                            "quality_failed",
+                            "feature_pending",
+                            "feature_complete",
+                            "acquisition_failure",
+                            "partial",
+                            "review_pending",
+                            "reviewed",
+                            "flagged",
+                            "excluded",
+                            "archived",
+                            "revoked"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "client_session_id"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "scan"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "scan": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "client_session_id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "capture_pending",
+                            "quality_pending",
+                            "quality_passed",
+                            "quality_failed",
+                            "feature_pending",
+                            "feature_complete",
+                            "acquisition_failure",
+                            "partial",
+                            "review_pending",
+                            "reviewed",
+                            "flagged",
+                            "excluded",
+                            "archived",
+                            "revoked"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "client_session_id"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "scan"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Create a scan session (201 new, 200 if client_session_id already stored)",
+        "tags": [
+          "scans"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}": {
+      "get": {
+        "operationId": "getScan",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "scan": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "recaptures_remaining": {
+                          "additionalProperties": {
+                            "maximum": 9007199254740991,
+                            "minimum": -9007199254740991,
+                            "type": "integer"
+                          },
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "status": {
+                          "enum": [
+                            "capture_pending",
+                            "quality_pending",
+                            "quality_passed",
+                            "quality_failed",
+                            "feature_pending",
+                            "feature_complete",
+                            "acquisition_failure",
+                            "partial",
+                            "review_pending",
+                            "reviewed",
+                            "flagged",
+                            "excluded",
+                            "archived",
+                            "revoked"
+                          ],
+                          "type": "string"
+                        },
+                        "steps": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "attempt": {
+                                "maximum": 9007199254740991,
+                                "minimum": -9007199254740991,
+                                "type": "integer"
+                              },
+                              "device_verdict": {
+                                "enum": [
+                                  "ACCEPT",
+                                  "RECAPTURE",
+                                  "UNABLE_TO_ACQUIRE"
+                                ],
+                                "type": "string"
+                              },
+                              "reason_codes": {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              },
+                              "server_verdict": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "step": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "step",
+                              "attempt",
+                              "device_verdict",
+                              "server_verdict",
+                              "reason_codes"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "steps",
+                        "recaptures_remaining"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "scan"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          },
+          {
+            "deviceBearer": []
+          }
+        ],
+        "summary": "Read a scan with per-step attempts and recaptures remaining",
+        "tags": [
+          "scans"
+        ],
+        "x-auth": "user_or_device",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/artefacts": {
+      "post": {
+        "operationId": "declareArtefact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "attempt": {
+                    "maximum": 3,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "device_verdict": {
+                    "default": "ACCEPT",
+                    "description": "Used only when this declare creates the step attempt (pre-registered scans); ignored otherwise",
+                    "enum": [
+                      "ACCEPT",
+                      "RECAPTURE",
+                      "UNABLE_TO_ACQUIRE"
+                    ],
+                    "type": "string"
+                  },
+                  "key_alg": {
+                    "enum": [
+                      "RSA-OAEP-256"
+                    ],
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "video",
+                      "roi_trace",
+                      "metadata"
+                    ],
+                    "type": "string"
+                  },
+                  "kms_key_id": {
+                    "description": "Server KMS key the data key was wrapped for",
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "pattern": "^[0-9a-fA-F]{64}$",
+                    "type": "string"
+                  },
+                  "size_bytes": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "step": {
+                    "enum": [
+                      "neutral_face",
+                      "fingertip_ppg",
+                      "ocular_capture",
+                      "dorsal_tongue"
+                    ],
+                    "type": "string"
+                  },
+                  "wrapped_key": {
+                    "description": "base64 RSA-OAEP-SHA256 ciphertext of the 32-byte artefact data key (RSA 3072-4096 bit)",
+                    "maxLength": 684,
+                    "minLength": 512,
+                    "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "attempt",
+                  "kind",
+                  "size_bytes",
+                  "sha256",
+                  "wrapped_key",
+                  "key_alg",
+                  "kms_key_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artefact_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "upload_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "artefact_id",
+                    "upload_id"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "artefact_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "upload_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "artefact_id",
+                    "upload_id"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
+          },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          },
+          {
+            "deviceBearer": []
+          }
+        ],
+        "summary": "Declare an artefact and open a multipart upload (201 new, 200 if already declared)",
+        "tags": [
+          "artefacts"
+        ],
+        "x-auth": "user_or_device",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/experimental": {
+      "get": {
+        "operationId": "getExperimentalView",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "items": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "domain": {
+                            "enum": [
+                              "rppg_face",
+                              "rppg_fingertip"
+                            ],
+                            "type": "string"
+                          },
+                          "label": {
+                            "const": "EXPERIMENTAL",
+                            "type": "string"
+                          },
+                          "notice": {
+                            "type": "string"
+                          },
+                          "pulse_rate_bpm": {
+                            "maximum": 9007199254740991,
+                            "minimum": -9007199254740991,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "domain",
+                          "pulse_rate_bpm",
+                          "label",
+                          "notice"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "items"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Gated experimental pulse-rate view (not validated for care decisions)",
+        "tags": [
+          "review"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/features/extract": {
+      "post": {
+        "operationId": "extractFeatures",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "scan_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": "extraction_accepted",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scan_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Request feature extraction (system agent; scan must be quality_passed)",
+        "tags": [
+          "scans"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "system_agent"
+        ]
+      }
+    },
+    "/v1/scans/{id}/recapture": {
+      "post": {
+        "operationId": "recaptureScanSteps",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "steps": {
+                    "items": {
+                      "enum": [
+                        "neutral_face",
+                        "fingertip_ppg",
+                        "ocular_capture",
+                        "dorsal_tongue"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 4,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "trigger_reason_code": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "steps",
+                  "trigger_reason_code"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "scan": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "type": "string"
+                        },
+                        "recaptures_remaining": {
+                          "additionalProperties": {
+                            "maximum": 9007199254740991,
+                            "minimum": -9007199254740991,
+                            "type": "integer"
+                          },
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "status": {
+                          "enum": [
+                            "capture_pending",
+                            "quality_pending",
+                            "quality_passed",
+                            "quality_failed",
+                            "feature_pending",
+                            "feature_complete",
+                            "acquisition_failure",
+                            "partial",
+                            "review_pending",
+                            "reviewed",
+                            "flagged",
+                            "excluded",
+                            "archived",
+                            "revoked"
+                          ],
+                          "type": "string"
+                        },
+                        "steps": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "attempt": {
+                                "maximum": 9007199254740991,
+                                "minimum": -9007199254740991,
+                                "type": "integer"
+                              },
+                              "device_verdict": {
+                                "enum": [
+                                  "ACCEPT",
+                                  "RECAPTURE",
+                                  "UNABLE_TO_ACQUIRE"
+                                ],
+                                "type": "string"
+                              },
+                              "reason_codes": {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              },
+                              "server_verdict": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "step": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "step",
+                              "attempt",
+                              "device_verdict",
+                              "server_verdict",
+                              "reason_codes"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "steps",
+                        "recaptures_remaining"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "scan"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable (DS_QG_000, DS_QG_099, DS_UPLOAD_001/002)"
+          },
+          "451": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Consent gate (DS_REG_001 / DS_REG_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Request recapture of steps (max 3 attempts per step)",
+        "tags": [
+          "scans"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/review": {
+      "post": {
+        "operationId": "reviewScan",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "confirm",
+                      "flag",
+                      "request_repeat",
+                      "exclude"
+                    ],
+                    "type": "string"
+                  },
+                  "challenge_id": {
+                    "description": "From POST /v1/scans/{id}/review-challenge; single use, bound to this body",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  },
+                  "note": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "webauthn_assertion": {
+                    "additionalProperties": {},
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "challenge_id",
+                  "action",
+                  "webauthn_assertion"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "push": {
+                      "enum": [
+                        "sent",
+                        "failed",
+                        "skipped"
+                      ],
+                      "type": "string"
+                    },
+                    "review_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "scan_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "reviewed",
+                        "flagged",
+                        "excluded"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "review_id",
+                    "scan_id",
+                    "status",
+                    "push"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Clinician review with WebAuthn step-up over a server-issued challenge (challenge_id)",
+        "tags": [
+          "review"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "clinician"
+        ]
+      }
+    },
+    "/v1/scans/{id}/review-challenge": {
+      "post": {
+        "operationId": "createReviewChallenge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "confirm",
+                      "flag",
+                      "request_repeat",
+                      "exclude"
+                    ],
+                    "type": "string"
+                  },
+                  "note": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reason_code": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "challenge": {
+                      "description": "32 random bytes, base64url (no padding); the WebAuthn challenge to sign",
+                      "type": "string"
+                    },
+                    "challenge_id": {
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "const": 300,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "challenge_id",
+                    "challenge",
+                    "expires_in"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict (DS_IDEMPOTENCY_001/003, DS_SCAN_001/002, DS_STATE_001, DS_UPLOAD_003/004/005, DS_CLINICAL_001, DS_DEVICE_005)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request payload too large (DS_VALIDATION_002)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Issue a single-use WebAuthn challenge bound to a review (5 min; no Idempotency-Key)",
+        "tags": [
+          "review"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "clinician"
+        ]
+      }
+    },
+    "/v1/wards/{wardId}/roster": {
+      "get": {
+        "operationId": "getWardRoster",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "wardId",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "generated_at": {
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "type": "string"
+                    },
+                    "items": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "bed_label": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "consent": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "block_code": {
+                                "anyOf": [
+                                  {
+                                    "enum": [
+                                      "DS_REG_001",
+                                      "DS_REG_002"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "description": "451 code a capture would get now; null when capture is allowed"
+                              },
+                              "capture_allowed": {
+                                "description": "Same rule as the capture gate: true only when block_code is null",
+                                "type": "boolean"
+                              },
+                              "checked_at": {
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                                "type": "string"
+                              },
+                              "consent_version": {
+                                "type": "string"
+                              },
+                              "current_version": {
+                                "type": "string"
+                              },
+                              "primary_research": {
+                                "type": "boolean"
+                              },
+                              "withdrawn": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "primary_research",
+                              "consent_version",
+                              "current_version",
+                              "withdrawn",
+                              "capture_allowed",
+                              "block_code",
+                              "checked_at"
+                            ],
+                            "type": "object"
+                          },
+                          "participant_code": {
+                            "type": "string"
+                          },
+                          "patient_id": {
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "patient_id",
+                          "participant_code",
+                          "bed_label",
+                          "consent"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "generated_at"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation failed (DS_VALIDATION_001) or Idempotency-Key missing (DS_IDEMPOTENCY_002)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthenticated (DS_AUTH_001), device/assertion failure (DS_DEVICE_001..004), or review step-up failure (DS_AUTH_003)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Role or token kind not allowed (DS_AUTH_002) or audit failure (DS_AUD_001)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found or not visible to the caller (DS_NOT_FOUND)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error (DS_INTERNAL_001)"
+          }
+        },
+        "security": [
+          {
+            "userBearer": []
+          }
+        ],
+        "summary": "Ward roster with consent status",
+        "tags": [
+          "patients"
+        ],
+        "x-auth": "user",
+        "x-roles": [
+          "nurse_operator",
+          "clinician"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "artefacts"
+    },
+    {
+      "name": "clinical"
+    },
+    {
+      "name": "devices"
+    },
+    {
+      "name": "patients"
+    },
+    {
+      "name": "review"
+    },
+    {
+      "name": "scans"
+    },
+    {
+      "name": "system"
+    }
+  ],
+  "x-error-catalog": [
+    {
+      "code": "DS_AUD_001",
+      "http_status": 403,
+      "meaning": "The audit record could not be written, so the whole operation was rolled back."
+    },
+    {
+      "code": "DS_AUD_002",
+      "http_status": 500,
+      "meaning": "Database-level guard: the audit trigger requires READ COMMITTED isolation. A server defect if it ever surfaces; reported as DS_INTERNAL_001."
+    },
+    {
+      "code": "DS_AUTH_001",
+      "http_status": 401,
+      "meaning": "Credentials missing, malformed, invalid or expired."
+    },
+    {
+      "code": "DS_AUTH_002",
+      "http_status": 403,
+      "meaning": "Valid credentials, but the token kind or role is not allowed on this route (including a device token on a user-only route)."
+    },
+    {
+      "code": "DS_AUTH_003",
+      "http_status": 401,
+      "meaning": "Clinician review step-up failed: the review challenge is unknown, expired, already used, issued to someone else or bound to a different scan/action/reason_code/note, or the WebAuthn assertion over it could not be verified. Challenges are single use (spent even on failure): request a new one."
+    },
+    {
+      "code": "DS_CLINICAL_001",
+      "http_status": 409,
+      "meaning": "An observation_id or lab id is already in use for a different patient."
+    },
+    {
+      "code": "DS_DEVICE_001",
+      "http_status": 401,
+      "meaning": "The device is not enrolled or has been revoked."
+    },
+    {
+      "code": "DS_DEVICE_002",
+      "http_status": 401,
+      "meaning": "The App Attest assertion counter did not strictly increase (replay)."
+    },
+    {
+      "code": "DS_DEVICE_003",
+      "http_status": 401,
+      "meaning": "The challenge is unknown, expired, already used, or was not issued to the caller."
+    },
+    {
+      "code": "DS_DEVICE_004",
+      "http_status": 401,
+      "meaning": "App Attest attestation or assertion verification failed."
+    },
+    {
+      "code": "DS_DEVICE_005",
+      "http_status": 409,
+      "meaning": "This App Attest key_id is already enrolled."
+    },
+    {
+      "code": "DS_IDEMPOTENCY_001",
+      "http_status": 409,
+      "meaning": "The Idempotency-Key was already used with a different request payload."
+    },
+    {
+      "code": "DS_IDEMPOTENCY_002",
+      "http_status": 400,
+      "meaning": "The Idempotency-Key header (UUID v4) is missing or malformed."
+    },
+    {
+      "code": "DS_IDEMPOTENCY_003",
+      "http_status": 409,
+      "meaning": "A request with this Idempotency-Key is still in progress; retry later."
+    },
+    {
+      "code": "DS_INTERNAL_001",
+      "http_status": 500,
+      "meaning": "Unexpected server error. The response carries no internal detail."
+    },
+    {
+      "code": "DS_NOT_FOUND",
+      "http_status": 404,
+      "meaning": "No such route, or the resource does not exist or is not visible to the caller (access denial on a resource is reported as 404, never 403)."
+    },
+    {
+      "code": "DS_QG_000",
+      "http_status": 422,
+      "meaning": "The scan has not passed the quality gate (status is not quality_passed)."
+    },
+    {
+      "code": "DS_QG_099",
+      "http_status": 422,
+      "meaning": "Maximum recaptures reached for a step; the step is marked UNABLE_TO_ACQUIRE. detail lists unable_to_acquire, recaptured and the new scan status."
+    },
+    {
+      "code": "DS_RATE_001",
+      "http_status": 429,
+      "meaning": "Too many outstanding renewal challenges for this device."
+    },
+    {
+      "code": "DS_REG_001",
+      "http_status": 451,
+      "meaning": "Regulatory hold: no valid primary-research consent (none recorded, withdrawn, or not primary research)."
+    },
+    {
+      "code": "DS_REG_002",
+      "http_status": 451,
+      "meaning": "The patient consented to a superseded consent version; re-consent is required."
+    },
+    {
+      "code": "DS_SCAN_001",
+      "http_status": 409,
+      "meaning": "Another non-revoked scan for this patient was captured within 30 minutes of captured_at."
+    },
+    {
+      "code": "DS_SCAN_002",
+      "http_status": 409,
+      "meaning": "client_session_id is already used for a different scan."
+    },
+    {
+      "code": "DS_STATE_001",
+      "http_status": 409,
+      "meaning": "The scan status does not allow this operation (illegal transition)."
+    },
+    {
+      "code": "DS_STATE_002",
+      "http_status": 500,
+      "meaning": "Database-level guard: an immutable scan column was changed. A server defect if it ever surfaces; reported as DS_INTERNAL_001."
+    },
+    {
+      "code": "DS_STATE_003",
+      "http_status": 500,
+      "meaning": "Database-level guard: the acting role lacks authority for the scan transition. Reported as DS_INTERNAL_001 if it ever surfaces."
+    },
+    {
+      "code": "DS_UPLOAD_001",
+      "http_status": 422,
+      "meaning": "The uploaded object sha256 does not match the declared value; the artefact is marked rejected."
+    },
+    {
+      "code": "DS_UPLOAD_002",
+      "http_status": 422,
+      "meaning": "The step is not part of this scan (not in its capture_steps). A missing attempt of a captured step is created by the declare itself."
+    },
+    {
+      "code": "DS_UPLOAD_003",
+      "http_status": 409,
+      "meaning": "The artefact was already declared with a different sha256."
+    },
+    {
+      "code": "DS_UPLOAD_004",
+      "http_status": 409,
+      "meaning": "The artefact status does not accept upload parts."
+    },
+    {
+      "code": "DS_UPLOAD_005",
+      "http_status": 409,
+      "meaning": "The upload is incomplete: the uploaded parts add up to fewer bytes than size_bytes (detail: received_bytes, size_bytes). Retryable: upload the missing parts and complete again (the same Idempotency-Key may be reused). The artefact status is unchanged."
+    },
+    {
+      "code": "DS_VALIDATION_001",
+      "http_status": 400,
+      "meaning": "Request validation failed (unknown field, wrong type, out of range, wrong unit, unsupported media type, malformed JSON). detail.issues lists the problems."
+    },
+    {
+      "code": "DS_VALIDATION_002",
+      "http_status": 413,
+      "meaning": "Request payload too large (body over the server limit, 1 MiB)."
+    }
+  ]
+}

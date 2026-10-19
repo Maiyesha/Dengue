@@ -17,3 +17,8 @@ skills-lock.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Swift
+ios/**/.build/
+ios/**/.swiftpm/
+ios/**/Package.resolved
